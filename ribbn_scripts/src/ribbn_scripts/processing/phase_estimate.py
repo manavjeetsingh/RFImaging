@@ -68,7 +68,7 @@ def multidist_multifreq_phase_estimation(freq_range, data_df, correction_factor,
                         
                         tx_dat = read_network_analyzer_file(
                             f'{calibration_path}/VNA_Oct2024/tag'+str(tx_for_vna)+'_channel_b\'' + f"ch_{str(ch)}" + '\'_vna_pwr_15.csv')
-                        
+                        # print(rx_for_pv)
                         rx_pv=pickle.load(open(f"{calibration_path}/PV_data_Aug2024/tag{rx_for_pv}_pv_polynomials_rx.pkl","rb"))
                         
                         sl_tx = tx_dat[1] * np.exp(1j * tx_dat[2])
@@ -101,6 +101,7 @@ def multidist_multifreq_phase_estimation(freq_range, data_df, correction_factor,
                             using_exp_no=int(adc_out_df.loc[adc_out_df['delta']==adc_out_df['delta'].min(),'Unique Exp Number'].iloc[0])
                         else:
                             assert(using_exp_no==int(adc_out_df.loc[adc_out_df['delta']==adc_out_df['delta'].min(),'Unique Exp Number'].iloc[0]))
+                        # print(rx_pv.keys())
                         dbm_corrected=np.polyval(rx_pv[freq/1e6]["polynomial"],np.log(adc_out))
                         mV_corrected=dbm_to_mV(dbm_corrected)
                         amps.append(mV_corrected)
@@ -199,7 +200,8 @@ def multidist_multifreq_phase_estimation(freq_range, data_df, correction_factor,
     if plot==True:
         plt.figure(figsize=[20,25])
 
-        for plot_no, freq in enumerate(list(all_freqs.keys())[::4]):
+        for plot_no, freq in enumerate(list(all_freqs.keys())[::]):
+        # for plot_no, freq in enumerate(list(all_freqs.keys())[::4]):
             # if freq!=995e6:
             #     continue
             freq=int(freq)
