@@ -1,0 +1,2 @@
+Frequencies covered: [915]
+Time taken: 5.039122104644775 seconds
