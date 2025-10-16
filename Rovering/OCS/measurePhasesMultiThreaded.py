@@ -11,6 +11,8 @@ import os
 import multiprocessing
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+import uvicorn
 
 app = FastAPI()
 
@@ -97,8 +99,8 @@ def initialize():
     # Start the child processes
     process1.start()
     process2.start()
-    process3.start()
-initialize()
+    # process3.start()
+
 
 def MPP(cmdq_rx,cmdq_tx, result_q):
     """
@@ -305,4 +307,10 @@ def ping():
 
 @app.get("/ping")
 def ping():
+    initialize()
     return {"status": "good"}
+
+if __name__=="__main__":
+    
+    time.sleep(5)
+    uvicorn.run("measurePhasesMultiThreaded:app", host="0.0.0.0", port=8008, reload=True)
