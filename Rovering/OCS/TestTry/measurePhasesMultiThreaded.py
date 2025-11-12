@@ -199,6 +199,7 @@ def main(run_exp_num, freq_range=FREQ_RANGE, repetitions=INBUILT_REPETITIONS):
         print("Had to stop script prematurely. Had the following exception: ",e)
         premature_stop=1
         premature_stop_error=e
+        raise e
             
     
     save_path=f"{FOLDER_PATH}/dataframes/{exp_no}.df"
@@ -239,7 +240,6 @@ def MPPNetReq(conf: ExpParams):
     return {"Error Encountered": err}
 
 
-@app.get("/test")
 def test():
     exc.set_pwr(EXC_POWER)
     exc.set_freq(915)
@@ -293,11 +293,62 @@ def test():
     input("Print enter to continue")
     
     return {"Test": "done"}
-    
-# @app.get("/ping")
-def ping():
-    return {"status": "good"}
 
+
+
+
+@app.get("/test")
+def netTest():
+    exc.set_pwr(EXC_POWER)
+    exc.set_freq(915)
+    # Pre-testing tags
+    print("TESTING")
+    
+    # --- Get MAC addresses ---
+    print("\nRequesting MAC addresses from devices...")
+    cmd_q1.put("get_mac")
+    cmd_q2.put("get_mac")
+
+    mac_results = {}
+    while len(mac_results) < 2:
+        tag_id, res_type, data = result_q.get()
+        if res_type == 'mac':
+            print(f"✅ Main process received: MAC for Tag {tag_id} is {data}")
+            mac_results[tag_id] = data
+
+    time.sleep(SLEEPTIME)
+
+    print("Changing phase to 1.")
+    cmd_q1.put("ch_1\0\n")
+    cmd_q2.put("ch_1\0\n")
+
+    time.sleep(SLEEPTIME)
+    cmd_q1.put("get_adc_val")
+    cmd_q2.put("get_adc_val")
+    adc_results = {}
+    while len(adc_results) < 2:
+        tag_id, res_type, data = result_q.get()
+        if res_type == 'adc_vals':
+            print(f"✅ ADC val received for tag {tag_id} is {np.median(data)}")
+            adc_results[tag_id] = data
+
+    time.sleep(SLEEPTIME)
+
+    print("Changing phase to 2.")
+    cmd_q1.put("ch_2\0\n")
+    cmd_q2.put("ch_2\0\n")
+
+    time.sleep(SLEEPTIME)
+    cmd_q1.put("get_adc_val")
+    cmd_q2.put("get_adc_val")
+    adc_results = {}
+    while len(adc_results) < 2:
+        tag_id, res_type, data = result_q.get()
+        if res_type == 'adc_vals':
+            print(f"✅ ADC val received for tag {tag_id} is {np.median(data)}")
+            adc_results[tag_id] = data
+    
+    return {"Test": "done"}
 
 # if __name__=="__main__":
 #     initialize()
@@ -305,12 +356,19 @@ def ping():
 #     main(1)
 
 
+@app.get("/initialize")
+def netInitialize():
+    try:
+        initialize()
+    except:
+        return {"status": "initializationErrror"}    
+    return {"status": "Initialized"}
+
 @app.get("/ping")
 def ping():
-    initialize()
     return {"status": "good"}
 
 if __name__=="__main__":
-    
-    time.sleep(5)
-    uvicorn.run("measurePhasesMultiThreaded:app", host="0.0.0.0", port=8008, reload=True)
+
+    # should be initialized when running for the first time.
+    uvicorn.run("measurePhasesMultiThreaded:app", host="0.0.0.0", port=8001, reload=True)
