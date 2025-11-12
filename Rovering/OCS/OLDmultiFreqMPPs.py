@@ -212,4 +212,23 @@ def ping():
     return {"status": "good"}
 
 
+# def run_server():
+#     print("Starting Uvicorn server")
+#     uvicorn.run("multiFreqMPPs:app", host="0.0.0.0", port=8001, reload=True)
+
+# if __name__=="__main__":
+
+#     server_process=Process(target=run_server())
+
+    
+
+    
+
+#     while True:
+#         time.sleep(200)
+
+    
+
+
+
 
