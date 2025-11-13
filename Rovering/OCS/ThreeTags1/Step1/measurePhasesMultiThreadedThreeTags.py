@@ -208,7 +208,8 @@ def main3Ways(run_exp_num, freq_range=FREQ_RANGE, repetitions=INBUILT_REPETITION
                 "NumMPPs": repetitions
                 },
             ]
-            DF=pd.concat([DF,pd.DataFrame([entries])],ignore_index=True)
+            DF=pd.concat([DF,pd.DataFrame([entries[0]])],ignore_index=True)
+            DF=pd.concat([DF,pd.DataFrame([entries[1]])],ignore_index=True)
 
             voltage_readings_2, mpp_start_time_2, mpp_stop_time_2=MPP3Ways(cmdq_rx_lst=[cmd_q2,cmd_q3], cmdq_tx=cmd_q1, result_q=result_q)
             entries=[
@@ -231,7 +232,8 @@ def main3Ways(run_exp_num, freq_range=FREQ_RANGE, repetitions=INBUILT_REPETITION
                 "NumMPPs": repetitions
                 },
             ]
-            DF=pd.concat([DF,pd.DataFrame([entries])],ignore_index=True)
+            DF=pd.concat([DF,pd.DataFrame([entries[0]])],ignore_index=True)
+            DF=pd.concat([DF,pd.DataFrame([entries[1]])],ignore_index=True)
             
             voltage_readings_3, mpp_start_time_3, mpp_stop_time_3=MPP3Ways(cmdq_rx_lst=[cmd_q1,cmd_q2], cmdq_tx=cmd_q3, result_q=result_q)
             entries=[
@@ -254,7 +256,8 @@ def main3Ways(run_exp_num, freq_range=FREQ_RANGE, repetitions=INBUILT_REPETITION
                 "NumMPPs": repetitions
                 },
             ]
-            DF=pd.concat([DF,pd.DataFrame([entries])],ignore_index=True)
+            DF=pd.concat([DF,pd.DataFrame([entries[0]])],ignore_index=True)
+            DF=pd.concat([DF,pd.DataFrame([entries[1]])],ignore_index=True)
 
             FREQS_DONE.append(freq)
             DF_SNAPSHOP=DF
@@ -391,7 +394,7 @@ def MPPNetReqTest():
                         10)
     err=main3Ways(run_exp_num=1,
          freq_range=freq_range,
-         repetitions=1)
+         repetitions=5)
     
     return {"Error Encountered": err}
 
