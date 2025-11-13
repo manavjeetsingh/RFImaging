@@ -64,7 +64,7 @@ INBUILT_REPETITIONS=5
 FREQ_RANGE=list(range(775,1005,10))
 
 # # Setting up the exciter
-EXC_POWER=12.9
+EXC_POWER=6.9
 exc = Exciter()
 exc.set_freq(915)
 exc.set_pwr(EXC_POWER)
@@ -182,13 +182,12 @@ def main3Ways(run_exp_num, freq_range=FREQ_RANGE, repetitions=INBUILT_REPETITION
                                 "Frequency (MHz)", "Run Exp Num", "NumMPPs"])
     DF_SNAPSHOP=DF
 
-
     try:
         for freq in freq_range:
             exc.set_freq(freq)
             print("FREQ:",freq)
 
-            voltage_readings_1, mpp_start_time_1, mpp_stop_time_1=MPP3Ways(cmdq_rx=[cmd_q1,cmd_q3], cmdq_tx=cmd_q2, result_q=result_q)
+            voltage_readings_1, mpp_start_time_1, mpp_stop_time_1=MPP3Ways(cmdq_rx_lst=[cmd_q1,cmd_q3], cmdq_tx=cmd_q2, result_q=result_q)
             entries=[
                 {"Rx":"Tag1", 
                 "Tx":"Tag2", 
@@ -211,7 +210,7 @@ def main3Ways(run_exp_num, freq_range=FREQ_RANGE, repetitions=INBUILT_REPETITION
             ]
             DF=pd.concat([DF,pd.DataFrame([entries])],ignore_index=True)
 
-            voltage_readings_2, mpp_start_time_2, mpp_stop_time_2=MPP(cmdq_rx=[cmd_q2,cmd_q3], cmdq_tx=cmd_q1, result_q=result_q)
+            voltage_readings_2, mpp_start_time_2, mpp_stop_time_2=MPP3Ways(cmdq_rx_lst=[cmd_q2,cmd_q3], cmdq_tx=cmd_q1, result_q=result_q)
             entries=[
                 {"Rx":"Tag2", 
                 "Tx":"Tag1", 
@@ -234,7 +233,7 @@ def main3Ways(run_exp_num, freq_range=FREQ_RANGE, repetitions=INBUILT_REPETITION
             ]
             DF=pd.concat([DF,pd.DataFrame([entries])],ignore_index=True)
             
-            voltage_readings_3, mpp_start_time_3, mpp_stop_time_3=MPP(cmdq_rx=[cmd_q1,cmd_q2], cmdq_tx=cmd_q3, result_q=result_q)
+            voltage_readings_3, mpp_start_time_3, mpp_stop_time_3=MPP3Ways(cmdq_rx_lst=[cmd_q1,cmd_q2], cmdq_tx=cmd_q3, result_q=result_q)
             entries=[
                 {"Rx":"Tag1", 
                 "Tx":"Tag3", 
@@ -379,12 +378,22 @@ def MPPNetReq(conf: ExpParams):
     freq_range=np.arange(conf.freq_range_start,
                         conf.freq_range_stop,
                         conf.freq_range_interval)
-    err=main(run_exp_num=conf.run_exp_num,
+    err=main3Ways(run_exp_num=conf.run_exp_num,
          freq_range=freq_range,
          repetitions=conf.repetitions)
     
     return {"Error Encountered": err}
 
+@app.get("/MPPTest")
+def MPPNetReqTest():
+    freq_range=np.arange(905,
+                        935,
+                        10)
+    err=main3Ways(run_exp_num=1,
+         freq_range=freq_range,
+         repetitions=1)
+    
+    return {"Error Encountered": err}
 
 # def test():
 #     exc.set_pwr(EXC_POWER)
@@ -522,4 +531,4 @@ def ping():
 if __name__=="__main__":
 
     # should be initialized when running for the first time.
-    uvicorn.run("measurePhasesMultiThreaded:app", host="0.0.0.0", port=8001, reload=True)
+    uvicorn.run("measurePhasesMultiThreadedThreeTags:app", host="0.0.0.0", port=8001, reload=True)
