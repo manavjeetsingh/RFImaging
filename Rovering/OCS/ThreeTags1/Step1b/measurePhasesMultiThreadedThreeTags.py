@@ -534,4 +534,4 @@ def ping():
 if __name__=="__main__":
 
     # should be initialized when running for the first time.
-    uvicorn.run("measurePhasesMultiThreadedThreeTags:app", host="0.0.0.0", port=8001, reload=True)
+    uvicorn.run("measurePhasesMultiThreadedThreeTags:app", host="0.0.0.0", port=8002, reload=True)
