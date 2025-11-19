@@ -71,12 +71,12 @@ exc.set_pwr(EXC_POWER)
 
 # Connecting to Tags
 # TAG1_COM="/dev/tty.usbserial-2130"
-TAG1_COM="COM3"
+TAG1_COM="COM5" # v32-4
 # TAG2_COM="/dev/tty.usbserial-2120"
-TAG2_COM="COM6"
-TAG3_COM="COM4"
-TAG4_COM="COM"
-TAG5_COM="COM"
+TAG2_COM="COM3" #v32-5
+TAG3_COM="COM4" #v31-2
+TAG4_COM="COM7" #v31-1 
+TAG5_COM="COM6" #v32-3
 
 
 # FOLDER_PATH="C:/git/T2TExperiments/DistExperiments/EstimatingDistNCS330Feb2_1"
@@ -84,7 +84,7 @@ FOLDER_PATH=os.getcwd()
 
 cmd_q1, cmd_q2, cmd_q3, cmd_q4, cmd_q5,\
 result_q, process1, process2, process3, process4, process5\
-    =None, None, None, None, None, None, None
+    =None, None, None, None, None, None, None, None, None, None, None
 
 def initialize():
     global cmd_q1, cmd_q2, cmd_q3, cmd_q4, cmd_q5,\
@@ -157,11 +157,11 @@ def MPPMultiWays(cmdq_rx_lst:list,cmdq_tx, result_q):
     for cmdq_rx in cmdq_rx_lst:
         cmdq_rx.put("stop_reading")
     voltage_readings = {}
-    while len(voltage_readings) < 2:
+    while len(voltage_readings) < len(cmdq_rx_lst):
         tag_id, res_type, data = result_q.get()
         if res_type == "voltage_readings":
             voltage_readings[tag_id] = data
-
+    print("MPP DONE WITH TAGS:",len(voltage_readings))
     return voltage_readings, mpp_start_time, mpp_stop_time
 
 
@@ -206,18 +206,19 @@ def mainMultiWays(run_exp_num, freq_range=FREQ_RANGE, repetitions=INBUILT_REPETI
                 Tx_tag_num = all_tag_names[i]                # single element
                 
                 Rx_queues = all_cmd_queues[:i] + all_cmd_queues[i+1:]    # all remaining elements
-                Rx_tag_name = all_tag_names[:i] + all_tag_names[i+1:]    # all remaining elements
-                Rx_tag_num = all_tag_names[:i] + all_tag_names[i+1:]    # all remaining elements
-                print([Tx_tag_name, Rx_tag_name])
+                Rx_tag_names = all_tag_names[:i] + all_tag_names[i+1:]    # all remaining elements
+                Rx_tag_nums = all_tag_names[:i] + all_tag_names[i+1:]    # all remaining elements
+                print([Tx_tag_name, Rx_tag_names])
 
                 voltage_readings_1, mpp_start_time_1, mpp_stop_time_1=MPPMultiWays(cmdq_rx_lst=Rx_queues, cmdq_tx=Tx_queue, result_q=result_q)
-                for voltages, rx_tag in zip(voltage_readings_1,Rx_tag_name):
+                print(voltage_readings_1)
+                for voltageIdx, rx_tag in zip(Rx_tag_nums,Rx_tag_names):
                     entry={
                         "Rx":rx_tag, 
                         "Tx":Tx_tag_name, 
                         "MPP Start Time (s)":mpp_start_time_1, 
                         "MPP Stop Time (s)":mpp_stop_time_1, 
-                        "Voltages (mV)":voltages,
+                        "Voltages (mV)":voltage_readings_1[voltageIdx],
                         "Frequency (MHz)":freq, 
                         "Run Exp Num":run_exp_num,
                         "NumMPPs": repetitions
@@ -418,8 +419,8 @@ def MPPNetReq(conf: ExpParams):
     freq_range=np.arange(conf.freq_range_start,
                         conf.freq_range_stop,
                         conf.freq_range_interval)
-    err=main5Ways(run_exp_num=conf.run_exp_num,
-         freq_range=freq_range)
+    err=mainMultiWays(run_exp_num=conf.run_exp_num,
+         freq_range=freq_range, repetitions=5)
         #  repetitions=conf.repetitions)
     
     return {"Error Encountered": err}
@@ -428,8 +429,8 @@ def MPPNetReq(conf: ExpParams):
 def MPPNetReqTest():
     freq_range=np.arange(905,
                         935,
-                        10)
-    err=main5Ways(run_exp_num=1,
+                        100)
+    err=mainMultiWays(run_exp_num=1,
          freq_range=freq_range,
          repetitions=5)
     
@@ -504,9 +505,11 @@ def netTest():
     cmd_q1.put("get_mac")
     cmd_q2.put("get_mac")
     cmd_q3.put("get_mac")
+    cmd_q4.put("get_mac")
+    cmd_q5.put("get_mac")
 
     mac_results = {}
-    while len(mac_results) < 3:
+    while len(mac_results) < 5:
         tag_id, res_type, data = result_q.get()
         if res_type == 'mac':
             print(f"✅ Main process received: MAC for Tag {tag_id} is {data}")
@@ -518,13 +521,18 @@ def netTest():
     cmd_q1.put("ch_1\0\n")
     cmd_q2.put("ch_1\0\n")
     cmd_q3.put("ch_1\0\n")
+    cmd_q4.put("ch_1\0\n")
+    cmd_q5.put("ch_1\0\n")
 
     time.sleep(SLEEPTIME)
     cmd_q1.put("get_adc_val")
     cmd_q2.put("get_adc_val")
     cmd_q3.put("get_adc_val")
+    cmd_q4.put("get_adc_val")
+    cmd_q5.put("get_adc_val")
+
     adc_results = {}
-    while len(adc_results) < 3:
+    while len(adc_results) < 5:
         tag_id, res_type, data = result_q.get()
         if res_type == 'adc_vals':
             print(f"✅ ADC val received for tag {tag_id} is {np.median(data)}")
@@ -536,13 +544,17 @@ def netTest():
     cmd_q1.put("ch_2\0\n")
     cmd_q2.put("ch_2\0\n")
     cmd_q3.put("ch_2\0\n")
+    cmd_q4.put("ch_2\0\n")
+    cmd_q5.put("ch_2\0\n")
 
     time.sleep(SLEEPTIME)
     cmd_q1.put("get_adc_val")
     cmd_q2.put("get_adc_val")
     cmd_q3.put("get_adc_val")
+    cmd_q4.put("get_adc_val")
+    cmd_q5.put("get_adc_val")
     adc_results = {}
-    while len(adc_results) < 3:
+    while len(adc_results) < 5:
         tag_id, res_type, data = result_q.get()
         if res_type == 'adc_vals':
             print(f"✅ ADC val received for tag {tag_id} is {np.median(data)}")
@@ -571,4 +583,4 @@ def ping():
 if __name__=="__main__":
 
     # should be initialized when running for the first time.
-    uvicorn.run("measurePhasesMultiThreadedThreeTags:app", host="0.0.0.0", port=8001, reload=True)
+    uvicorn.run("measurePhasesMultiThreadedMultiTags:app", host="0.0.0.0", port=8001, reload=True)
