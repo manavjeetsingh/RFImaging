@@ -73,7 +73,7 @@ exc.set_pwr(EXC_POWER)
 # TAG1_COM="/dev/tty.usbserial-2130"
 TAG1_COM="COM5" # v32-4
 # TAG2_COM="/dev/tty.usbserial-2120"
-TAG2_COM="COM3" #v32-5
+TAG2_COM="COM3" `#v32-5`
 TAG3_COM="COM4" #v31-2
 TAG4_COM="COM7" #v31-1 
 TAG5_COM="COM6" #v32-3
