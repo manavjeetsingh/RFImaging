@@ -330,7 +330,7 @@ def save_excitations():
                 end_times.append(end_time)
                 print(len(voltage_readings))
             print(len(all_voltage_readings))
-            print(min(all_voltage_readings))
+            print(np.percentile(all_voltage_readings,2))
             for reps in range(maxreps):
                 plt.plot(np.linspace(start_times[reps]-start_times[0], end_times[reps]-start_times[0], len(all_voltage_readings_split[reps])), all_voltage_readings_split[reps],'.', ms=1)
             plt.show()
@@ -345,7 +345,7 @@ def save_excitations():
                 pickle.dump(info, f)
                 
             with open("voltageData.csv",'a') as f:
-                f.write(f"{exciter_wall_dist},{tag_wall_dist},{[min(all_voltage_readings)]}\n")
+                f.write(f"{exciter_wall_dist},{tag_wall_dist},{[np.percentile(all_voltage_readings,2)]}\n")
             
     finally:
         exc.set_pwr(-30)
