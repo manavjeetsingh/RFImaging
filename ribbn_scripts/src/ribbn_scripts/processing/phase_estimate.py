@@ -8,7 +8,7 @@ import copy
 calibration_path="/Users/manavjeet/git/T2TExperiments/coba/calibrations"
 
 def dbm_to_mV(dbm,Z=50):
-    return 1000*np.sqrt(Z/1000)*(10**(dbm/20))
+    return 1000*np.sqrt(Z/1000)*(10**(dbm/10))
 
 
 
@@ -44,20 +44,16 @@ def multidist_multifreq_phase_estimation(freq_range, data_df, correction_factor,
                 thetas=[]
                 for rx in ["1","2"]:
                     if rx=="1":
-                        tx="2"
-                        rx_for_vna='5'
-                        tx_for_vna='4'
-                        rx_for_pv='1'
+                        tx_for_vna='v32-3'
+                        rx_for_pv='v32-5'
                     # else: # todo make this as an argument of the function
                     #     tx="1"
                     #     rx_for_vna='4'
                     #     tx_for_vna='5'
                     #     rx_for_pv='4'
                     else: # todo make this as an argument of the function
-                        tx="1"
-                        rx_for_vna='4'
-                        tx_for_vna='5'
-                        rx_for_pv='3'
+                        tx_for_vna='v32-5'
+                        rx_for_pv='v32-3'
                     
                     phases=[]
                     amps = []
@@ -67,9 +63,9 @@ def multidist_multifreq_phase_estimation(freq_range, data_df, correction_factor,
                         # TODO: add another loop to distinguish between various experiments at the same/similar distances and various locations
                         
                         tx_dat = read_network_analyzer_file(
-                            f'{calibration_path}/VNA_Oct2024/tag'+str(tx_for_vna)+'_channel_b\'' + f"ch_{str(ch)}" + '\'_vna_pwr_15.csv')
+                            f'{calibration_path}/VNA_Dec2025/'+str(tx_for_vna)+'_channel_b\'' + f"ch_{str(ch)}" + '\'_vna_pwr_15.csv')
                         # print(rx_for_pv)
-                        rx_pv=pickle.load(open(f"{calibration_path}/PV_data_Aug2024/tag{rx_for_pv}_pv_polynomials_rx.pkl","rb"))
+                        rx_pv=pickle.load(open(f"{calibration_path}/PV_data_Dec2025/{rx_for_pv}_pv_polynomials_rx.pkl","rb"))
                         
                         sl_tx = tx_dat[1] * np.exp(1j * tx_dat[2])
                         gamma = (s2z(sl_tx) - s2z(np.conj(50))) / (s2z(sl_tx) + s2z(50))
@@ -119,7 +115,7 @@ def multidist_multifreq_phase_estimation(freq_range, data_df, correction_factor,
                     thetas.append(th)
                     
                     selected_experiments.append(using_exp_no)
-
+                
                 assert(len(thetas)==2)
                 # if thetas[0]<0.35 and thetas[1]>2.79:
                 #     thetas[0]=np.pi-thetas[0]
@@ -384,9 +380,7 @@ def multitag_multifreq_phase_estimation(freq_range, data_df, correction_factor, 
                         if f"{rx}-{tx}" not in thetas:
                             thetas[f"{tx}-{rx}"]=[]
                         thetas[f"{rx}-{tx}"].append(th)
-                    
                     selected_experiments.append(using_exp_no)
-
             theta_12_perExp={}
             for tx in all_available_tags:
                 rx_tags=copy.deepcopy(all_available_tags)
@@ -396,17 +390,17 @@ def multitag_multifreq_phase_estimation(freq_range, data_df, correction_factor, 
                     if int(tx)<int(rx):
                         dict_str=f"{tx}-{rx}"
                     else:
-                        dict_str=f"{rx}-{tx}"
+                        continue
                     assert(len(thetas[dict_str])==2)
-            
+                    print(thetas[dict_str]  )
                     # if thetas[0]<0.35 and thetas[1]>2.79:
                     #     thetas[0]=np.pi-thetas[0]
                     # elif thetas[0]>2.79 and thetas[1]<0.35:
                     #     thetas[1]=np.pi-thetas[1]
                     if isinstance(correction_factor, dict):
-                        theta_12_perExp[dict_str]=((thetas[dict_str][0]+thetas[dict_str][1])/2+correction_factor[freq])%np.pi
+                        theta_12_perExp[dict_str]=((np.sum(thetas[dict_str])/2+correction_factor[freq])%np.pi)
                     else:
-                        theta_12_perExp[dict_str]=((thetas[dict_str][0]+thetas[dict_str][1])/2+correction_factor)%np.pi
+                        theta_12_perExp[dict_str]=((np.sum(thetas[dict_str])/2+correction_factor)%np.pi)
 
             if exp_no not in theta12s.keys():
                 # theta12s[dist+correction_factor]=[]
