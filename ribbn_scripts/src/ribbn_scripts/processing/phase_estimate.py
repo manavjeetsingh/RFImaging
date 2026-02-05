@@ -316,14 +316,17 @@ def multitag_multifreq_phase_estimation(freq_range, data_df, correction_factor, 
                     using_exp_no=None
                     for ch in ch_list:
                         
-                        if tag_name_mappings==None:
-                            tx_dat = read_network_analyzer_file(
-                                f'{calibration_path}/VNA_Oct2024/tag'+str(tx_for_vna)+'_channel_b\'' + f"ch_{str(ch)}" + '\'_vna_pwr_15.csv')
-                            rx_pv=pickle.load(open(f"{calibration_path}/PV_data_Aug2024/tag{rx_for_pv}_pv_polynomials_rx.pkl","rb"))
-                        else:
-                            tx_dat = read_network_analyzer_file(
-                                f'{calibration_path}/VNA_Dec2025/'+tag_name_mappings[f"Tag{tx}"]+'_channel_b\'' + f"ch_{str(ch)}" + '\'_vna_pwr_15.csv')
-                            rx_pv=pickle.load(open(f"{calibration_path}/PV_data_Dec2025/{tag_name_mappings[f'Tag{tx}']}_pv_polynomials_rx.pkl","rb"))
+                        # if tag_name_mappings==None:
+                        #     tx_dat = read_network_analyzer_file(
+                        #         f'{calibration_path}/VNA_Oct2024/tag'+str(tx_for_vna)+'_channel_b\'' + f"ch_{str(ch)}" + '\'_vna_pwr_15.csv')
+                        #     rx_pv=pickle.load(open(f"{calibration_path}/PV_data_Aug2024/tag{rx_for_pv}_pv_polynomials_rx.pkl","rb"))
+                        # else:
+                        #     tx_dat = read_network_analyzer_file(
+                        #         f'{calibration_path}/VNA_Dec2025/'+tag_name_mappings[f"Tag{tx}"]+'_channel_b\'' + f"ch_{str(ch)}" + '\'_vna_pwr_15.csv')
+                        #     rx_pv=pickle.load(open(f"{calibration_path}/PV_data_Dec2025/{tag_name_mappings[f'Tag{tx}']}_pv_polynomials_rx.pkl","rb"))
+                        tx_dat = read_network_analyzer_file(
+                                f'{calibration_path}/VNA_Oct2024/tag4_channel_b\'' + f"ch_{str(ch)}" + '\'_vna_pwr_15.csv')
+                        rx_pv=pickle.load(open(f"{calibration_path}/PV_data_Aug2024/tag4_pv_polynomials_rx.pkl","rb"))
                         
                         sl_tx = tx_dat[1] * np.exp(1j * tx_dat[2])
                         gamma = (s2z(sl_tx) - s2z(np.conj(50))) / (s2z(sl_tx) + s2z(50))
