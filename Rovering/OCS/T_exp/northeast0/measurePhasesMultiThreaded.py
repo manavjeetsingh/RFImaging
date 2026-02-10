@@ -89,7 +89,7 @@ def initialize():
     # Create queues from the multiprocessing module
     cmd_q1 = multiprocessing.Queue()
     cmd_q2 = multiprocessing.Queue()
-    cmd_q3 = multiprocessing.Queue()
+    # cmd_q3 = multiprocessing.Queue()
     result_q = multiprocessing.Queue()
 
     process1 = multiprocessing.Process(target=device_worker, args=(TAG1_COM, 1, cmd_q1, result_q), daemon=True)
