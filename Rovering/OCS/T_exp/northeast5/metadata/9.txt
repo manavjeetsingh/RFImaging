@@ -1,0 +1,2 @@
+Frequencies covered: [np.int64(845), np.int64(855), np.int64(865), np.int64(875), np.int64(885), np.int64(895), np.int64(905), np.int64(915), np.int64(925), np.int64(935), np.int64(945)]
+Time taken: 55.80780243873596 seconds
