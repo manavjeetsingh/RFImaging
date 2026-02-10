@@ -30,6 +30,13 @@ def z2g(zl, za):
 
 
 def get_theta(s, row, phi):
+    """
+    Gives tag to tag phase estimate
+    
+    :param s: Adc voltages
+    :param row: Amplitude of gamma #Double check this
+    :param phi: Phase of gamma #Double check this
+    """
     h = []
     for row_ele, phi_ele in zip(row, phi):
         h.append([1, 1 - row_ele * np.cos(phi_ele), row_ele * np.sin(phi_ele)])
