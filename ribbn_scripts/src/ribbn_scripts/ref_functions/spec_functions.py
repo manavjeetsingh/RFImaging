@@ -34,8 +34,8 @@ def get_theta(s, row, phi):
     Gives tag to tag phase estimate
     
     :param s: Adc voltages
-    :param row: Amplitude of gamma #Double check this
-    :param phi: Phase of gamma #Double check this
+    :param row: Amplitude of gamma  
+    :param phi: Phase of gamma 
     """
     h = []
     for row_ele, phi_ele in zip(row, phi):
@@ -45,9 +45,16 @@ def get_theta(s, row, phi):
     return math.atan2(out[2], out[1])
 
 def get_amplitude(s, row, phi):
+    """
+    Gives tag to tag phase estimate
+    
+    :param s: Adc voltages
+    :param row: Amplitude of gamma  
+    :param phi: Phase of gamma 
+    """
     h = []
     for row_ele, phi_ele in zip(row, phi):
         h.append([1, 1 - row_ele * np.cos(phi_ele), row_ele * np.sin(phi_ele)])
 
     out = np.matmul(np.matmul(np.linalg.inv(np.matmul(np.transpose(h), h)), np.transpose(h)), s)
-    return math.atan2(out[2], out[1])
+    return (out[1] ** 2 + out[2] ** 2) ** 0.5
