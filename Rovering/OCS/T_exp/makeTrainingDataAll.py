@@ -221,9 +221,9 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 folders = [os.path.join(current_dir, d) for d in os.listdir(current_dir) if os.path.isdir(os.path.join(current_dir, d))]
 for folder in folders:
     print(folder)
-    if os.path.exists(f"{folder}/Y_dist.npy"):
-        print("SKIPPING...")
-        continue
+    # if os.path.exists(f"{folder}/Y_dist.npy"):
+    #     print("SKIPPING...")
+    #     continue
     with open(f"{folder}/processedDF.pkl",'rb') as f:
         processedDF = pickle.load(f)
         
@@ -315,7 +315,7 @@ for folder in folders:
                         
                     voltages.append(np.mean(amps))
                     
-                    th = get_theta(amps, attns, phases) 
+                    th = get_theta(np.array(amps)/1000, attns, phases) 
                     thetas.append(th)
                     t2tamp = get_amplitude(amps, attns, phases) 
                     amplitudes.append(t2tamp)

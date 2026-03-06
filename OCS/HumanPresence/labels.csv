@@ -1,13 +1,3 @@
-Run	Label	T2T distance	Wall dist
-0	No human	83.6	70
-1	No human	83.6	70
-2	No human	83.6	70
-3	Very close	83.6	70
-4	Very close	83.6	70
-5	Very close	83.6	70
-6	Bit further. In front of exciter.	83.6	70
-7	Bit further. In front of exciter.	83.6	70
-8	Bit further. In front of exciter.	83.6	70
-9	"Bit further, close to one tag"	83.6	70
-10	"Bit further, close to one tag"	83.6	70
-11	"Bit further, close to one tag"	83.6	70
+version https://git-lfs.github.com/spec/v1
+oid sha256:6198db692ad9faff29c934ba4c95763465bb141538c6cc5e76476622cc6ccbe8
+size 413
