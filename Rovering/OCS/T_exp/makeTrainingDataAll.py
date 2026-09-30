@@ -217,180 +217,199 @@ def plot_poses_flat(pos_all, orientation_all):
     plt.show()
 
 
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("--force", action="store_true", help="Reprocess folders that already have output files")
+args = parser.parse_args()
+
+processed_files = ["X_processed.npy", "X_processed_all.npy", "Y_dist.npy", "Y_norm.npy"]
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 folders = [os.path.join(current_dir, d) for d in os.listdir(current_dir) if os.path.isdir(os.path.join(current_dir, d))]
+failed_folders = []
 for folder in folders:
     print(folder)
-    # if os.path.exists(f"{folder}/Y_dist.npy"):
-    #     print("SKIPPING...")
-    #     continue
-    with open(f"{folder}/processedDF.pkl",'rb') as f:
-        processedDF = pickle.load(f)
-        
-    # In a set of 10 MPPs first 5 are from tag1 to tag2, next 5 are from tag2 to tag1. 
-    # These 5 mpps can be cross multiplied to get 25 phase measurements.
+    if not args.force and all(os.path.exists(os.path.join(folder, f)) for f in processed_files):
+        print("  Already processed, skipping. Use --force to reprocess.")
+        continue
+    try:
+        with open(f"{folder}/processedDF.pkl", 'rb') as f:
+            processedDF = pickle.load(f)
 
-    #Dims: (no of experiments (locations), number of unique frequencies, two dims (phase and amp), 25 values (5mpps X 5mpp))
-    FINAL_DATA=np.zeros([np.max(processedDF['Run Exp Num'])+1, len(np.unique(processedDF["Frequency (MHz)"])), 2, 25])
+        # In a set of 10 MPPs first 5 are from tag1 to tag2, next 5 are from tag2 to tag1.
+        # These 5 mpps can be cross multiplied to get 25 phase measurements.
 
-    calibration_path="/Users/manavjeet/git/T2TExperiments/coba/calibrations"
-    ch_list = ['1', '3', '4', '6', '7','8']
-    freq_idx=0
+        calibration_path="/Users/manavjeet/git/T2TExperiments/coba/calibrations"
+        ch_list = ['1', '3', '4', '6', '7','8']
 
+        # Compute global min number of voltage readings across all rows and channels
+        global_min_len = min(len(processedDF.iloc[i][f"Phase{ch}"]) for i in range(len(processedDF)) for ch in ch_list)
 
-    for i in range(0,len(processedDF),10):
-        if freq_idx>=FINAL_DATA.shape[1]:
-            freq_idx=0
+        #Dims: (no of experiments (locations), number of unique frequencies, two dims (phase and amp), 25 * voltage readings per pair)
+        FINAL_DATA_ALL=np.zeros([np.max(processedDF['Run Exp Num'])+1, len(np.unique(processedDF["Frequency (MHz)"])), 2, 25 * global_min_len])
 
-        DFoI_1 = processedDF[i:i+5]
-        DFoI_2 = processedDF[i+5:i+10]
-        
-        #Check if the frequency used in same across MPPs
-        assert(DFoI_1.iloc[0]['Frequency (MHz)']==DFoI_2.iloc[-1]['Frequency (MHz)'])
-        
-        #Check if the exp no used in same across MPPs
-        assert(DFoI_1.iloc[0]['Run Exp Num']==DFoI_2.iloc[-1]['Run Exp Num'])
-        
-        freq=DFoI_1.iloc[0]['Frequency (MHz)']*1e6
-        exp_no=DFoI_1.iloc[0]['Run Exp Num']
-        # if freq!=915e6:
-        #     continue
-        all_channel_atten=[]
-        all_channel_phase=[]
-        for row1 in range(5):
-            for row2 in range(5):
-                # print(ff)
-                # ff+=1
-                t1_row = DFoI_1.iloc[row1]
-                t2_row = DFoI_2.iloc[row2]
-                # print(t2_row)
-                
-                thetas=[]
-                amplitudes=[]
-                voltages=[]
-                for rx in ['1','2']:
-                    if rx=="1":
-                        tx_for_vna='v32-3'
-                        rx_for_pv='v32-5'
-                        # rx_for_vna='tag4'
-                        # tx_for_vna='tag5'
-                        # rx_for_pv='tag4'
-                    else: # todo make this as an argument of the function
-                        tx_for_vna='v32-5'
-                        rx_for_pv='v32-3'
-                        # rx_for_vna='tag5'
-                        # tx_for_vna='tag4'
-                        # rx_for_pv='tag1'
+        freq_idx=0
 
-                    phases=[]
-                    amps = []
-                    attns = []
-                    for ch in ch_list:
-                        if rx=='1':
-                            adc_out=t1_row[f"Phase{ch}"]
+        for i in range(0,len(processedDF),10):
+            if freq_idx>=FINAL_DATA_ALL.shape[1]:
+                freq_idx=0
+
+            DFoI_1 = processedDF[i:i+5]
+            DFoI_2 = processedDF[i+5:i+10]
+
+            #Check if the frequency used in same across MPPs
+            assert(DFoI_1.iloc[0]['Frequency (MHz)']==DFoI_2.iloc[-1]['Frequency (MHz)'])
+
+            #Check if the exp no used in same across MPPs
+            assert(DFoI_1.iloc[0]['Run Exp Num']==DFoI_2.iloc[-1]['Run Exp Num'])
+
+            freq=DFoI_1.iloc[0]['Frequency (MHz)']*1e6
+            exp_no=DFoI_1.iloc[0]['Run Exp Num']
+
+            # Find min voltage readings for this block across all rows and channels
+            min_len = min(
+                min(len(DFoI_1.iloc[r][f"Phase{ch}"]) for r in range(5) for ch in ch_list),
+                min(len(DFoI_2.iloc[r][f"Phase{ch}"]) for r in range(5) for ch in ch_list)
+            )
+
+            all_channel_atten=[]
+            all_channel_phase=[]
+            for row1 in range(5):
+                for row2 in range(5):
+                    t1_row = DFoI_1.iloc[row1]
+                    t2_row = DFoI_2.iloc[row2]
+
+                    # Precompute VNA calibration — same for all voltage reading indices
+                    calib = {}
+                    for rx in ['1','2']:
+                        if rx=="1":
+                            tx_for_vna='v32-3'
+                            rx_for_pv='v32-5'
+                            row = t1_row
                         else:
-                            adc_out=t2_row[f"Phase{ch}"]
-                        
-                        tx_dat = read_network_analyzer_file(
-                                f'{calibration_path}/VNA_Dec2025/'+str(tx_for_vna)+'_channel_b\'' + f"ch_{str(ch)}" + '\'_vna_pwr_15.csv')
-                        
-                        # tx_dat = read_network_analyzer_file(
-                        #         f'{calibration_path}/VNA_Oct2024/'+str(tx_for_vna)+'_channel_b\'' + f"ch_{str(ch)}" + '\'_vna_pwr_15.csv')
-                        sl_tx = tx_dat[1] * np.exp(1j * tx_dat[2])
-                        gamma = (s2z(sl_tx) - s2z(np.conj(50))) / (s2z(sl_tx) + s2z(50))
-                        gamma=1-gamma
+                            tx_for_vna='v32-5'
+                            rx_for_pv='v32-3'
+                            row = t2_row
 
-                        freq_all = tx_dat[0]
-                        p = np.polyfit(freq_all, np.unwrap(np.angle(gamma)), 1)
-                        phases.append(np.polyval(p, freq))
+                        gPhases=[]
+                        gAttns=[]
+                        for ch in ch_list:
+                            tx_dat = read_network_analyzer_file(
+                                    f'{calibration_path}/VNA_Dec2025/'+str(tx_for_vna)+'_channel_b\'' + f"ch_{str(ch)}" + '\'_vna_pwr_15.csv')
+                            sl_tx = tx_dat[1] * np.exp(1j * tx_dat[2])
+                            gamma = (s2z(sl_tx) - s2z(np.conj(50))) / (s2z(sl_tx) + s2z(50))
+                            gamma=1-gamma
+                            freq_all = tx_dat[0]
+                            p = np.polyfit(freq_all, np.unwrap(np.angle(gamma)), 1)
+                            gPhases.append(np.polyval(p, freq))
+                            p = np.polyfit(freq_all, abs(gamma), 1)
+                            gAttns.append(np.polyval(p, freq))
 
-                        p = np.polyfit(freq_all, abs(gamma), 1)
-                        attns.append(np.polyval(p, freq))
-                        
                         rx_pv=pickle.load(open(f"{calibration_path}/PV_data_Dec2025/{rx_for_pv}_pv_polynomials_rx.pkl","rb"))
-                        # rx_pv=pickle.load(open(f"{calibration_path}/PV_data_Aug2024/{rx_for_pv}_pv_polynomials_rx.pkl","rb"))
-                        dbm_corrected=np.polyval(rx_pv[freq/1e6]["polynomial"],np.log(adc_out))
-                        mV_corrected=dbm_to_mV(dbm_corrected)
-                        amps.append(mV_corrected)
-                        
-                    voltages.append(np.mean(amps))
-                    
-                    th = get_theta(np.array(amps)/1000, attns, phases) 
-                    thetas.append(th)
-                    t2tamp = get_amplitude(amps, attns, phases) 
-                    amplitudes.append(t2tamp)
-                
-                channel_phase=((thetas[0]+thetas[1])/2) % np.pi
-                channel_atten=(amplitudes[0]/voltages[1] + amplitudes[1]/voltages[0])/2
-                
-                all_channel_phase.append(channel_phase)
-                all_channel_atten.append(channel_atten)
-                
-                # print(f"Channel phase: {channel_phase}")
-                # print(f"Channel atten: {channel_atten}")
-                # print(f"Freq = {freq}")
-                # print(thetas)
-                # print(amplitudes)
-                # print(voltages)
-                # print()            
-                # break
-        #     break
-        # break
-        all_channel_atten=np.array(all_channel_atten)
-        all_channel_phase=np.array(all_channel_phase)
-        
-        FINAL_DATA[exp_no, freq_idx, 0,:]=all_channel_atten
-        FINAL_DATA[exp_no, freq_idx, 1,:]=all_channel_phase
-        
-        # print(len(all_channel_atten))
-        
-        freq_idx+=1
-        
-    print(f"Final Data shape: {FINAL_DATA.shape}")
-    np.save(f"{folder}/X_processed.npy", FINAL_DATA)
-    
-    # Sanity Check code
-    phases = np.unwrap(np.median(FINAL_DATA[7,:,1,:], axis=1), period=np.pi)
-    # phases = np.median(FINAL_DATA[2,:,1,:], axis=1)
-    freqs = np.array(processedDF["Frequency (MHz)"].unique(), dtype=float)*1e6
+                        calib[rx] = {'gPhases': gPhases, 'gAttns': gAttns, 'rx_pv': rx_pv, 'row': row}
 
-    # fit a line (slope, intercept)
-    p = np.polyfit(freqs, phases, 1)
-    slope, intercept = p[0], p[1]
-    slope-=np.pi/3e8
-    print("Slope:", slope, "Dist:",(3e8*slope)/(2*np.pi))
+                    # Compute channel_phase and channel_atten for each voltage reading index
+                    channel_phases_v = []
+                    channel_attens_v = []
 
-    # plot data and regression line
-    # plt.figure()
-    # plt.plot(freqs, phases, 'o', label='data')
-    # plt.plot(freqs, np.polyval(p, freqs), '-', label='linear fit')
-    # plt.xlabel('Frequency (MHz)')
-    # plt.ylabel('Phase (rad)')
-    # plt.legend()
-    # plt.show()
-    
-    # Generating Y data
-    experiment_dir_path="/Users/manavjeet/git/Backscatter_UGV_ws/experiments"
-    experiment_name = folder.split("/")[-1]
-    
-    pos_exp, pos_all, orientation_exp, orientation_all = extract_pos_odom(load_json(f"{experiment_dir_path}/{experiment_name}/{experiment_name}.json"), plotting=False)
-    mesh = o3d.io.read_triangle_mesh(f'{experiment_dir_path}/{experiment_name}/point_cloud_out/final_mesh.ply')
+                    for v in range(min_len):
+                        thetas=[]
+                        amplitudes=[]
+                        voltages=[]
 
-    # Only look at two dimentional north south west east direction
-    dirs = np.array([[
-        [1., 0, 0],
-        [-1, 0, 0],
-        [0, 1, 0],
-        [0, -1, 0],
-    ]])
+                        for rx in ['1','2']:
+                            gPhases = calib[rx]['gPhases']
+                            gAttns  = calib[rx]['gAttns']
+                            rx_pv   = calib[rx]['rx_pv']
+                            row     = calib[rx]['row']
 
-    t_hit, t_norm = get_dists_from_point(mesh, pos_exp, orientation_exp, dirs,verbose=False)
-    print(dirs.shape)
-    print(t_hit.shape)
-    print(t_norm.shape)
+                            amps = []
+                            for ch in ch_list:
+                                adc_out = row[f"Phase{ch}"][v]
+                                dbm_corrected=np.polyval(rx_pv[freq/1e6]["polynomial"],np.log(adc_out))
+                                mV_corrected=dbm_to_mV(dbm_corrected)
+                                amps.append(mV_corrected)
 
-    
-    np.save(f"{folder}/Y_dist.npy", t_hit)
-    np.save(f"{folder}/Y_norm.npy", t_norm)
+                            voltages.append(np.mean(amps))
+                            th = get_theta(np.array(amps)/1000, gAttns, gPhases)
+                            thetas.append(th)
+                            t2tamp = get_amplitude(amps, gAttns, gPhases)
+                            amplitudes.append(t2tamp)
 
-    # plot_poses_flat(pos_exp, orientation_exp)
+                        channel_phase=((thetas[0]+thetas[1])/2) % np.pi
+                        channel_atten=(amplitudes[0]/voltages[1] + amplitudes[1]/voltages[0])/2
+
+                        channel_phases_v.append(channel_phase)
+                        channel_attens_v.append(channel_atten)
+
+                    all_channel_phase.append(channel_phases_v)
+                    all_channel_atten.append(channel_attens_v)
+
+            # shape: (25, min_len) -> flatten to (25 * min_len,)
+            all_channel_atten=np.array(all_channel_atten).flatten()
+            all_channel_phase=np.array(all_channel_phase).flatten()
+
+            FINAL_DATA_ALL[exp_no, freq_idx, 0, :25*min_len]=all_channel_atten
+            FINAL_DATA_ALL[exp_no, freq_idx, 1, :25*min_len]=all_channel_phase
+
+            freq_idx+=1
+
+        # Median over all 225 phase estimates -> shape: (n_exp, n_freq, 2)
+        FINAL_DATA = np.median(FINAL_DATA_ALL, axis=3)
+
+        print(f"Final Data shape: {FINAL_DATA.shape}")
+        np.save(f"{folder}/X_processed.npy", FINAL_DATA)
+        np.save(f"{folder}/X_processed_all.npy", FINAL_DATA_ALL)
+
+        # Sanity Check code
+        phases = np.unwrap(FINAL_DATA[7,:,1], period=np.pi)
+        # phases = FINAL_DATA[2,:,1]
+        freqs = np.array(processedDF["Frequency (MHz)"].unique(), dtype=float)*1e6
+
+        # fit a line (slope, intercept)
+        p = np.polyfit(freqs, phases, 1)
+        slope, intercept = p[0], p[1]
+        print("Slope:", slope, "Dist:",(3e8*slope)/(2*np.pi))
+
+        # plot data and regression line
+        # plt.figure()
+        # plt.plot(freqs, phases, 'o', label='data')
+        # plt.plot(freqs, np.polyval(p, freqs), '-', label='linear fit')
+        # plt.xlabel('Frequency (MHz)')
+        # plt.ylabel('Phase (rad)')
+        # plt.legend()
+        # plt.show()
+
+        # Generating Y data
+        experiment_dir_path="/Users/manavjeet/git/Backscatter_UGV_ws/experiments"
+        experiment_name = folder.split("/")[-1]
+
+        pos_exp, pos_all, orientation_exp, orientation_all = extract_pos_odom(load_json(f"{experiment_dir_path}/{experiment_name}/{experiment_name}.json"), plotting=False)
+        mesh = o3d.io.read_triangle_mesh(f'{experiment_dir_path}/{experiment_name}/point_cloud_out/final_mesh.ply')
+
+        # Only look at two dimentional north south west east direction
+        dirs = np.array([[
+            [1., 0, 0],
+            [-1, 0, 0],
+            [0, 1, 0],
+            [0, -1, 0],
+        ]])
+
+        t_hit, t_norm = get_dists_from_point(mesh, pos_exp, orientation_exp, dirs,verbose=False)
+        print(dirs.shape)
+        print(t_hit.shape)
+        print(t_norm.shape)
+
+        np.save(f"{folder}/Y_dist.npy", t_hit)
+        np.save(f"{folder}/Y_norm.npy", t_norm)
+
+        # plot_poses_flat(pos_exp, orientation_exp)
+
+    except Exception as e:
+        print(f"  ERROR: {e}")
+        failed_folders.append(folder)
+
+if failed_folders:
+    print("\nFailed datasets:")
+    for f in failed_folders:
+        print(f"  {f}")
