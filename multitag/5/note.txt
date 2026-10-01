@@ -1,0 +1,1 @@
+Ignore the smaller closer dot in ply (one that is closer to the wall) for tag 7

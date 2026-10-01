@@ -8,7 +8,7 @@ import open3d.visualization.rendering as rendering
 #   Shift + right-click on the model to drop a sphere.
 #   Shift + right-drag an existing sphere to move it along the surface.
 #   Close the window or press "Done" to print/save the sphere-to-sphere distance matrix.
-PLY_PATH = sys.argv[1] if len(sys.argv) > 1 else "/Users/manavjeet/git/RFImaging/multitag/2/2214_2.ply"
+PLY_PATH = sys.argv[1] if len(sys.argv) > 1 else "/Users/manavjeet/git/RFImaging/multitag/4/2214_4.ply"
 OUT_DIR = os.path.dirname(os.path.abspath(PLY_PATH))  # results saved next to the PLY
 SINK = 0.75  # sphere center is pushed this many radii below the surface
 
