@@ -1,0 +1,157 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function [distanceMatrix] = selectEdgesForSFSDP_orig(sDim,noOfSensors,distanceMatrix,xMatrix,minDegree,ubdForSenToAnchorEdge,rand_state,plot_graph)
+
+
+
+
+% startingTime = tic; 
+[rowSize,colSize] = size(distanceMatrix);
+noOfAnchors = colSize - noOfSensors; 
+   
+aj_mat=distanceMatrix;
+aj_mat(colSize,colSize)=0;
+aj_mat=aj_mat+aj_mat';
+G=graph(aj_mat);
+edges_before=numedges(G);
+if plot_graph==1
+    % figure();
+    % plot(G);
+    % title("Before sensor link selection");
+    plotSensorGraph(xMatrix,aj_mat,"Before Link Selection")
+end 
+deg=mean(degree(G))
+before_mat_size=size(aj_mat);
+
+
+% Reordering sensors randomly --->
+sensorDistMat = distanceMatrix(:,1:noOfSensors)+distanceMatrix(:,1:noOfSensors)'; %MS: since the distanceMatrix is directed T1->T2!=0, T2->T1=0. Making it undirected.
+% rand('state',3202); 
+rand('state',rand_state); 
+[temp,permutation] = sort(rand(1,noOfSensors));
+[temp,invPermutation] = sort(permutation);
+sensorDistMat = sensorDistMat(permutation,permutation); 
+distanceMat2 = [sensorDistMat,distanceMatrix(permutation,noOfSensors+1:colSize)];
+distanceMat2 = triu(distanceMat2,1);
+
+
+% <--- Reordering sensors randomly 
+% clear distanceMatrix
+
+% fprintf('##0 %6.1f\n',toc(startingTime));
+% startingTime = tic; 
+
+% Selecting edges between sensors and anchors 
+% ---> 
+senToAnchorDistMat = sparse(rowSize,noOfAnchors); 
+countVector = sparse(1,rowSize); 
+for r=1:noOfAnchors
+    nzIdx = find(distanceMat2(:,noOfSensors+r)' > 0); 
+    if ~isempty(nzIdx)
+        for p=nzIdx
+            if (countVector(p) < ubdForSenToAnchorEdge)
+                senToAnchorDistMat(p,r) = distanceMat2(p,noOfSensors+r); 
+                countVector(p) = countVector(p) + 1;
+            end
+        end
+    end
+end
+% < ---
+% Selecting edges between sensors and anchors 
+
+% fprintf('##1 %6.1f\n',toc(startingTime));
+% startingTime = tic; 
+
+% Selecting edges between sensors and anchors 
+% ---> 
+countVector = min([countVector;repmat(sDim,1,noOfSensors)],[],1);
+noOfEffectiveDegrees = sum(countVector); 
+totalDegrees = noOfSensors*minDegree; 
+[nzzRowIdx,nzzColIdx,nzzValue] = find(distanceMat2(:,1:noOfSensors)'); 
+% clear distanceMat2
+noOfNzz = length(nzzRowIdx); 
+if noOfNzz == 0
+    fprinrf('## no edges between sensors\n');
+    
+else
+    selRowIdx = [];
+    selColIdx = [];
+    selValue  = [];
+    k = 0;
+    while (noOfEffectiveDegrees < totalDegrees) && (k < noOfNzz)
+        k = k+1;
+        p = nzzRowIdx(k);
+        q = nzzColIdx(k);
+        if (countVector(1,p) < minDegree)
+            selRowIdx = [selRowIdx;p];
+            selColIdx = [selColIdx;q];
+            selValue  = [selValue;nzzValue(k)];
+            countVector(p) = countVector(p)+1;
+            noOfEffectiveDegrees = noOfEffectiveDegrees+1;
+            if (countVector(1,q) < minDegree)
+                countVector(q) = countVector(q)+1;
+                noOfEffectiveDegrees = noOfEffectiveDegrees+1;
+            end
+        elseif (countVector(1,q) < minDegree)
+            selRowIdx = [selRowIdx;p];
+            selColIdx = [selColIdx;q];
+            selValue  = [selValue;nzzValue(k)];
+            countVector(q) = countVector(q)+1;
+            noOfEffectiveDegrees = noOfEffectiveDegrees+1;
+        end
+    end
+    distanceMat2 = ...
+        [sparse(selRowIdx,selColIdx,selValue,noOfSensors,noOfSensors)',...
+        senToAnchorDistMat];
+    
+    size(distanceMat2)
+    
+    
+end
+
+% fprintf('##2 %6.1f\n',toc(startingTime));
+% startingTime = tic; 
+
+
+distanceMat2(:,1:noOfSensors) = distanceMat2(:,1:noOfSensors) + distanceMat2(:,1:noOfSensors)';
+
+
+
+distanceMatrix = [distanceMat2(invPermutation,invPermutation),distanceMat2(invPermutation,noOfSensors+1:colSize)];
+
+% full(distanceMatrix)
+distanceMatrix = triu(distanceMatrix,1); 
+
+
+
+distanceMatrix = sparse(distanceMatrix);
+
+
+fprintf("---------------------")
+aj_mat=distanceMatrix;
+aj_mat(colSize,colSize)=0;
+aj_mat=aj_mat+aj_mat';
+fprintf("---------------------")
+G=graph(aj_mat);
+edges_after=numedges(G);
+after_deg=mean(degree(G))
+mat_size=size(aj_mat)
+if plot_graph==1
+    % % Replacing the following graph with the location aware graph
+    % figure();
+    % plot(G);
+    % title("After sensor link selection");
+    
+    % Location sensitive sensor graph
+    plotSensorGraph(xMatrix,aj_mat,"After Link Selection")
+end
+edges_before
+edges_after
+edges_reduction_percent=(edges_before-edges_after)/edges_before*100
+
+
+% fprintf('##3 %6.1f\n',toc(startingTime));
+% 
+% XXXXX
+
+return
+%%%%% end of selectEdgesForSFSDP2 %%%%%
