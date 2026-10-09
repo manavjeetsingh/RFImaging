@@ -5,7 +5,8 @@ import pandas as pd
 # Usage: python linkFeatures.py [root_dir] [out.csv]
 #   Reads mpp_testing_multifeq_775-995*.csv from every subdirectory of root_dir, combines the two
 #   unidirectional measurements of each tag pair into one link row (per frequency and run), and
-#   attaches the tag-to-tag distance from that subdirectory's distances.csv (or points.csv).
+#   attaches the tag-to-tag distance from that subdirectory's distances.csv (or points.csv) and the
+#   tag positions (tagA_x/y/z, tagB_x/y/z) from its points.csv.
 #
 # Conventions follow SenSys'21 Eqs. 4.5-4.9. A row with Tx=A, Rx=B is A backscattering to B and
 # yields the receiver-side estimates of that direction:
@@ -39,6 +40,11 @@ def load_distances(d):
     raise FileNotFoundError(f"no distances.csv or points.csv in {d}")
 
 
+def load_points(d):
+    """Return an Nx3 tag position array (index 0 = tag 1) from subdirectory d's points.csv."""
+    return pd.read_csv(os.path.join(d, "points.csv"))[["x", "y", "z"]].to_numpy()
+
+
 def trace_mean(s):
     return np.fromstring(s.strip("[]"), sep=",").mean()
 
@@ -46,6 +52,7 @@ def trace_mean(s):
 def process(csv_path):
     d = os.path.dirname(csv_path)
     D = load_distances(d)
+    P = load_points(d)
     df = pd.read_csv(csv_path)
     df["avgV"] = df["Voltages (mV)"].map(trace_mean)
     df["th"] = np.deg2rad(df["Unidirectional Phase (deg)"])
@@ -71,9 +78,14 @@ def process(csv_path):
     links["theta_theoretical"] = np.mod(2 * np.pi * links[FREQ] * 1e6 * links.distance / C, np.pi)
     links.insert(0, "experiment", os.path.basename(d))
     links["tagA_num"], links["tagB_num"] = ia + 1, ib + 1
+    pos_cols = []
+    for tag, idx in (("tagA", ia), ("tagB", ib)):
+        for k, axis in enumerate("xyz"):
+            links[f"{tag}_{axis}"] = P[idx, k]
+            pos_cols.append(f"{tag}_{axis}")
 
     cols = ["experiment", "A", "B", "tagA_num", "tagB_num", FREQ, RUN, "theta", "theta_theoretical", "alpha",
-            "avgV_A", "avgV_B", "V_A", "V_B", "Theta_A", "Theta_B", "beta_A", "beta_B", "distance"]
+            "avgV_A", "avgV_B", "V_A", "V_B", "Theta_A", "Theta_B", "beta_A", "beta_B", "distance"] + pos_cols
     return links[cols].rename(columns={"A": "tagA", "B": "tagB"})
 
 
