@@ -23,7 +23,7 @@ PATTERN = "mpp_testing_multifeq_775-995*.csv"
 
 # Data tag name -> 1-based tag number used in distances.csv/points.csv (row index = number - 1).
 ALIAS = {f"Tag{i}": i for i in range(1, 11)}
-ALIAS.update({"Tag15": 11, "Tag16": 12})
+ALIAS.update({"Tag15": 11, "Tag16": 12, "Tag17": 13, "Tag18": 14, "Tag19": 15})
 
 FREQ, RUN = "Frequency (MHz)", "Run Exp Num"
 C = 299792458.0  # speed of light (m/s)
