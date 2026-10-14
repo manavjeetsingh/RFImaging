@@ -31,7 +31,9 @@ import open3d as o3d
 #     wall_norm      [x, y, z] surface normal at each hit, flipped to face the centroid
 #     wall_angle     signed azimuthal incidence angle [deg]; 0 where the hit is not a wall
 #     wall_vertical  1 if the hit surface is vertical (|n_z| < 0.5), else 0
-#   Tag positions are ground truth (points.csv) for now.
+#   Tag positions are ground truth (points.csv) for now. Scan geometry within TAG_CLEAR_RADIUS of any
+#   tag of the experiment (the tags themselves, their holders) is removed before ray casting so the
+#   rays pass through it instead of reporting it as a wall (--tag-clear, 0 disables).
 #
 #   Levelling: some room scans are not z-up (exp 2 and 6 are tilted ~18 deg). The tags of an experiment
 #   are assumed to lie in one plane, so each experiment is rotated (about the origin) so that the
@@ -67,6 +69,7 @@ FEATS = ["theta", "alpha", "avgV_A", "avgV_B"]
 WALL_COLS = ["level_rot", "centroid", "pose", "north_dir", "wall_hit", "wall_norm", "wall_angle", "wall_vertical"]
 DIR_NAMES = ["N", "S", "E", "W"]
 VERTICAL_NZ_MAX = 0.5  # a hit is a wall when its normal is close to horizontal
+TAG_CLEAR_RADIUS = 0.2  # [m] scan triangles with a vertex this close to a tag are invisible to the rays
 
 
 def sample_permutations(tags, P, rng):
@@ -204,14 +207,31 @@ def load_mesh(ply_path, R=None):
     return mesh
 
 
-def load_scene(ply_path, R=None):
+def clear_around(mesh, points, radius):
+    """Remove the triangles of `mesh` with any vertex within `radius` of any of `points` (Mx3)."""
+    if radius <= 0:
+        return mesh
+    v = np.asarray(mesh.vertices)
+    near = np.zeros(len(v), dtype=bool)
+    for p in np.asarray(points, dtype=np.float64):
+        near |= np.sum((v - p) ** 2, axis=1) < radius ** 2
+    tri_mask = near[np.asarray(mesh.triangles)].any(axis=1)
+    mesh.remove_triangles_by_mask(tri_mask)
+    mesh.remove_unreferenced_vertices()
+    print(f"  removed {tri_mask.sum()} triangles within {radius} m of the tags")
+    return mesh
+
+
+def load_scene(ply_path, R=None, clear_points=None, clear_radius=TAG_CLEAR_RADIUS):
     mesh = load_mesh(ply_path, R)
+    if clear_points is not None:
+        mesh = clear_around(mesh, clear_points, clear_radius)
     scene = o3d.t.geometry.RaycastingScene()
     scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
     return scene
 
 
-def build(df, K, P, rng, base_dir):
+def build(df, K, P, rng, base_dir, tag_clear=TAG_CLEAR_RADIUS):
     rows = []
     for exp, g in df.groupby("experiment", sort=True):
         F, nums, names, xyz, runs, freqs = experiment_tensors(g)
@@ -223,9 +243,10 @@ def build(df, K, P, rng, base_dir):
                 subs.append((ci, pi, [int(t) for t in perm]))
         R = level_rotation([xyz[t] for t in nums])
         xyz = {t: (R @ np.asarray(p)).tolist() for t, p in xyz.items()}
-        scene = load_scene(os.path.join(base_dir, PLY_PATHS[str(exp)]), R)
         tilt = np.degrees(np.arccos(np.clip(R[2, 2], -1.0, 1.0)))
         print(f"experiment {exp}: levelled by {tilt:.2f} deg")
+        scene = load_scene(os.path.join(base_dir, PLY_PATHS[str(exp)]), R,
+                           clear_points=[xyz[t] for t in nums], clear_radius=tag_clear)
         walls = wall_raycast(scene, np.array([[xyz[t] for t in perm] for _, _, perm in subs]))
 
         for (ci, pi, perm), wall in zip(subs, walls):
@@ -263,6 +284,8 @@ if __name__ == "__main__":
     ap.add_argument("--input", default=os.path.join(here, "link_features.csv"))
     ap.add_argument("--output", default=None)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--tag-clear", type=float, default=TAG_CLEAR_RADIUS,
+                    help="radius [m] around each tag whose scan geometry the rays ignore (0 disables)")
     args = ap.parse_args()
     if args.K < 2 or args.P < 1:
         sys.exit("need K >= 2 and P >= 1")
@@ -274,7 +297,7 @@ if __name__ == "__main__":
     if missing:
         sys.exit(f"subdirectories missing from {args.input} or PLY_PATHS: {sorted(missing)}")
     df = df[df.experiment.astype(str).isin(SUBDIRS)]
-    out = build(df, args.K, args.P, np.random.default_rng(args.seed), here)
+    out = build(df, args.K, args.P, np.random.default_rng(args.seed), here, args.tag_clear)
     if out_path.endswith(".pkl"):
         out.to_pickle(out_path)
     else:
