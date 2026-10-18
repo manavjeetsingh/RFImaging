@@ -1,3 +1,4 @@
 *cluster_features*csv
 *.parsed.npz
 *.DS_Store
+*.room_alignment_walls.npz

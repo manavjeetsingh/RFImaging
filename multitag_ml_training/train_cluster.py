@@ -352,20 +352,28 @@ def preprocess(
     val_idx: np.ndarray,
     centroids: np.ndarray | None = None,
     poses: np.ndarray | None = None,
+    scalers: dict | None = None,
 ) -> tuple[dict, dict]:
     """
     Split by the given indices and fit one StandardScaler per feature group
     (theta / alpha / avgv / pos have different units) on train only.
+    With scalers given (e.g. scalers_from_checkpoint, for fine-tuning) they are
+    applied as-is instead of being fit.
     Same output layout as train_realistic.preprocess.
     """
     X_tr, X_va = X_raw[train_idx], X_raw[val_idx]
     feat_dim = X_raw.shape[2]
     X_tr_s = X_tr.reshape(-1, feat_dim).copy()
     X_va_s = X_va.reshape(-1, feat_dim).copy()
-    scalers: dict = {}
+    fixed = scalers is not None
+    scalers = dict(scalers) if fixed else {}
     for name, sl in feature_slices.items():
-        sc = StandardScaler()
-        X_tr_s[:, sl] = sc.fit_transform(X_tr_s[:, sl])
+        if fixed:
+            sc = scalers[f"x_{name}"]
+            X_tr_s[:, sl] = sc.transform(X_tr_s[:, sl])
+        else:
+            sc = StandardScaler()
+            X_tr_s[:, sl] = sc.fit_transform(X_tr_s[:, sl])
         X_va_s[:, sl] = sc.transform(X_va_s[:, sl])
         scalers[f"x_{name}"] = sc
     X_tr_s = X_tr_s.reshape(X_tr.shape).astype(np.float32)
@@ -384,6 +392,19 @@ def preprocess(
         centers_train=pick(centroids, train_idx), centers_val=pick(centroids, val_idx),
         pose_train=pick(poses, train_idx),        pose_val=pick(poses, val_idx),
     ), scalers
+
+
+def scalers_from_checkpoint(ckpt: dict) -> dict:
+    """Rebuild the fitted StandardScalers saved by Trainer.save_checkpoint."""
+    out = {}
+    for name, d in ckpt["scalers"].items():
+        sc = StandardScaler()
+        sc.mean_  = np.asarray(d["mean"], dtype=np.float64)
+        sc.scale_ = np.asarray(d["scale"], dtype=np.float64)
+        sc.var_   = sc.scale_ ** 2
+        sc.n_features_in_ = len(sc.mean_)
+        out[name] = sc
+    return out
 
 
 # ── AdamW param groups ────────────────────────────────────────────────────────
@@ -454,7 +475,7 @@ def parse_args() -> argparse.Namespace:
                    help="AdamW weight decay on weight matrices")
     p.add_argument("--l2_lambda", type=float, default=1e-4)
     p.add_argument("--huber_delta", type=float, default=0.1)
-    p.add_argument("--dist_clip", type=float, default=1000.0,
+    p.add_argument("--dist_clip", type=float, default=300.0,
                    help="Clamp GT wall distance [cm] in the loss (real rooms reach ~9 m)")
     p.add_argument("--seed", type=int, default=42)
 
