@@ -31,6 +31,7 @@ C = 299792458.0  # speed of light (m/s)
 
 def load_distances(d):
     """Return an NxN tag distance matrix (index 0 = tag 1) for subdirectory d."""
+    print(d)
     dist_path, pts_path = os.path.join(d, "distances.csv"), os.path.join(d, "points.csv")
     if os.path.exists(dist_path):
         return np.loadtxt(dist_path, delimiter=",", ndmin=2)

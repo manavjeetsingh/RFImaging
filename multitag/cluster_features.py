@@ -34,6 +34,9 @@ import open3d as o3d
 #   Tag positions are ground truth (points.csv) for now. Scan geometry within TAG_CLEAR_RADIUS of any
 #   tag of the experiment (the tags themselves, their holders) is removed before ray casting so the
 #   rays pass through it instead of reporting it as a wall (--tag-clear, 0 disables).
+#   Each experiment's clearing is shown in an Open3D window (removed triangles red, tags blue, wire
+#   sphere = clearing radius) and must be approved in the terminal after closing it: y accepts, s skips
+#   the experiment (no rows written for it), q aborts. --no-review disables this for batch runs.
 #
 #   Levelling: some room scans are not z-up (exp 2 and 6 are tilted ~18 deg). The tags of an experiment
 #   are assumed to lie in one plane, so each experiment is rotated (about the origin) so that the
@@ -45,7 +48,7 @@ import open3d as o3d
 
 # Subdirectories (experiment numbers in link_features.csv) to use; edit to select datasets.
 SUBDIRS = ["1", "2", "3", "4", "5", "6", "7", "8", "9","10",
-           "11","12","13"]
+           "11","12","13","14","15","16"]
 
 # Subdirectory -> room scan (.ply), relative to this file's directory.
 PLY_PATHS = {
@@ -62,6 +65,9 @@ PLY_PATHS = {
     "11": "11/2214_11_filled_erased.ply",
     "12": "12/2214_12_filled_erased.ply",
     "13": "13/2214_13_filled.ply",
+    "14": "14/2214_14_filled_erased.ply",
+    "15": "15/2214_15_erased.ply",
+    "16": "16/2214_16_filled_erased.ply",
 }
 
 FREQ, RUN = "Frequency (MHz)", "Run Exp Num"
@@ -70,6 +76,7 @@ WALL_COLS = ["level_rot", "centroid", "pose", "north_dir", "wall_hit", "wall_nor
 DIR_NAMES = ["N", "S", "E", "W"]
 VERTICAL_NZ_MAX = 0.5  # a hit is a wall when its normal is close to horizontal
 TAG_CLEAR_RADIUS = 0.2  # [m] scan triangles with a vertex this close to a tag are invisible to the rays
+REVIEW_MARGIN = 1.0  # [m] the clearing review shows the scan within this distance of the tags' bounding box
 
 
 def sample_permutations(tags, P, rng):
@@ -208,9 +215,14 @@ def load_mesh(ply_path, R=None):
 
 
 def clear_around(mesh, points, radius):
-    """Remove the triangles of `mesh` with any vertex within `radius` of any of `points` (Mx3)."""
+    """
+    Remove the triangles of `mesh` with any vertex within `radius` of any of `points` (Mx3).
+    Returns (kept mesh, mesh of the removed triangles).
+    """
+    removed = o3d.geometry.TriangleMesh(mesh)
     if radius <= 0:
-        return mesh
+        removed.remove_triangles_by_mask(np.ones(len(mesh.triangles), dtype=bool))
+        return mesh, removed
     v = np.asarray(mesh.vertices)
     near = np.zeros(len(v), dtype=bool)
     for p in np.asarray(points, dtype=np.float64):
@@ -218,20 +230,61 @@ def clear_around(mesh, points, radius):
     tri_mask = near[np.asarray(mesh.triangles)].any(axis=1)
     mesh.remove_triangles_by_mask(tri_mask)
     mesh.remove_unreferenced_vertices()
+    removed.remove_triangles_by_mask(~tri_mask)
+    removed.remove_unreferenced_vertices()
     print(f"  removed {tri_mask.sum()} triangles within {radius} m of the tags")
-    return mesh
+    return mesh, removed
 
 
-def load_scene(ply_path, R=None, clear_points=None, clear_radius=TAG_CLEAR_RADIUS):
+def review_clearing(mesh, removed, points, radius, title):
+    """
+    Show the scan around the tags with the removed triangles in red and the tags as blue spheres
+    (wireframe sphere = clearing radius), then ask for approval in the terminal once the window is closed.
+    Returns True to accept, False to skip the experiment; quits on 'q'.
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    box = o3d.geometry.AxisAlignedBoundingBox(pts.min(axis=0) - REVIEW_MARGIN, pts.max(axis=0) + REVIEW_MARGIN)
+    kept = mesh.crop(box)
+    if not kept.has_vertex_colors():
+        kept.paint_uniform_color([0.7, 0.7, 0.7])
+    kept.compute_vertex_normals()
+    cut = o3d.geometry.TriangleMesh(removed).paint_uniform_color([1.0, 0.0, 0.0])
+    cut.compute_vertex_normals()
+    geoms = [kept, cut]
+    for p in pts:
+        tag = o3d.geometry.TriangleMesh.create_sphere(radius=0.01).translate(p)
+        tag.paint_uniform_color([0.0, 0.3, 1.0])
+        tag.compute_vertex_normals()
+        ring = o3d.geometry.LineSet.create_from_triangle_mesh(
+            o3d.geometry.TriangleMesh.create_sphere(radius=radius, resolution=8).translate(p))
+        ring.paint_uniform_color([0.0, 0.3, 1.0])
+        geoms += [tag, ring]
+    print(f"  review: red = removed ({len(removed.triangles)} triangles), blue = tags; close the window to continue")
+    o3d.visualization.draw_geometries(geoms, window_name=title, mesh_show_back_face=True)
+    while True:
+        ans = input("  accept clearing? [y]es / [s]kip experiment / [q]uit: ").strip().lower()
+        if ans in ("y", "yes"):
+            return True
+        if ans in ("s", "skip"):
+            return False
+        if ans in ("q", "quit"):
+            sys.exit("aborted during clearing review")
+
+
+def load_scene(ply_path, R=None, clear_points=None, clear_radius=TAG_CLEAR_RADIUS, review=False):
+    """Raycasting scene of the room scan, or None when the clearing review rejects it."""
     mesh = load_mesh(ply_path, R)
     if clear_points is not None:
-        mesh = clear_around(mesh, clear_points, clear_radius)
+        mesh, removed = clear_around(mesh, clear_points, clear_radius)
+        if review and clear_radius > 0 and not review_clearing(
+                mesh, removed, clear_points, clear_radius, f"tag clearing: {os.path.basename(ply_path)}"):
+            return None
     scene = o3d.t.geometry.RaycastingScene()
     scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
     return scene
 
 
-def build(df, K, P, rng, base_dir, tag_clear=TAG_CLEAR_RADIUS):
+def build(df, K, P, rng, base_dir, tag_clear=TAG_CLEAR_RADIUS, review=False):
     rows = []
     for exp, g in df.groupby("experiment", sort=True):
         F, nums, names, xyz, runs, freqs = experiment_tensors(g)
@@ -246,7 +299,10 @@ def build(df, K, P, rng, base_dir, tag_clear=TAG_CLEAR_RADIUS):
         tilt = np.degrees(np.arccos(np.clip(R[2, 2], -1.0, 1.0)))
         print(f"experiment {exp}: levelled by {tilt:.2f} deg")
         scene = load_scene(os.path.join(base_dir, PLY_PATHS[str(exp)]), R,
-                           clear_points=[xyz[t] for t in nums], clear_radius=tag_clear)
+                           clear_points=[xyz[t] for t in nums], clear_radius=tag_clear, review=review)
+        if scene is None:
+            print(f"experiment {exp}: skipped (clearing rejected)")
+            continue
         walls = wall_raycast(scene, np.array([[xyz[t] for t in perm] for _, _, perm in subs]))
 
         for (ci, pi, perm), wall in zip(subs, walls):
@@ -286,6 +342,8 @@ if __name__ == "__main__":
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--tag-clear", type=float, default=TAG_CLEAR_RADIUS,
                     help="radius [m] around each tag whose scan geometry the rays ignore (0 disables)")
+    ap.add_argument("--no-review", action="store_true",
+                    help="skip the per-experiment visual approval of the tag clearing")
     args = ap.parse_args()
     if args.K < 2 or args.P < 1:
         sys.exit("need K >= 2 and P >= 1")
@@ -297,7 +355,10 @@ if __name__ == "__main__":
     if missing:
         sys.exit(f"subdirectories missing from {args.input} or PLY_PATHS: {sorted(missing)}")
     df = df[df.experiment.astype(str).isin(SUBDIRS)]
-    out = build(df, args.K, args.P, np.random.default_rng(args.seed), here, args.tag_clear)
+    out = build(df, args.K, args.P, np.random.default_rng(args.seed), here, args.tag_clear,
+                review=not args.no_review)
+    if out.empty:
+        sys.exit("no experiments accepted; nothing saved")
     if out_path.endswith(".pkl"):
         out.to_pickle(out_path)
     else:
