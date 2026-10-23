@@ -4,11 +4,15 @@ import pandas as pd
 import open3d as o3d
 
 # Usage: python cluster_features.py K P [--input link_features.csv] [--output cluster_features_K{K}_P{P}.csv] [--seed 0]
+#                                    [--align-walls]   (default output name gets an _aligned suffix)
+#                                    [--max-short-links X Y]   (default output name gets _short{X}lt{Y}m)
 #   Builds sub-cluster feature rows from linkFeatures.py output. Each experiment (dataset) is a cluster
 #   of N tags; for every one of the N-choose-K tag combinations, P distinct orderings (permutations) of
 #   the K tags are sampled at random (all K! of them if P >= K!). The ordering is the tag naming of the
 #   sub-cluster: position i in the permutation is tag i, and links are listed in ascending order of
 #   these names, i.e. (t1,t2), (t1,t3), ..., (t1,tK), (t2,t3), ..., (tK-1,tK).
+#   --max-short-links X Y drops every combination with more than X links shorter than Y [m] (3-D
+#   tag-to-tag distance); combination_id keeps the index among all N-choose-K combinations.
 #
 #   One output row per (experiment, combination, permutation, run, frequency) with list-valued cells:
 #     tags        tag names in permutation order              (K)
@@ -43,6 +47,11 @@ import open3d as o3d
 #   normal of the plane fitted through all its tags becomes +z. The rotation is applied to the tags
 #   and the room scan before ray casting, and every coordinate written out (tag_xyz, centroid, pose,
 #   north_dir, wall_norm) is in this levelled frame.
+#   Wall alignment (--align-walls): each room scan has an arbitrary heading. Rooms are close to
+#   rectangular, so after levelling each experiment is additionally turned about +z (independently
+#   per experiment) so that its dominant wall direction lies along the x / y axes. The direction is
+#   the area-weighted peak, modulo 90 deg, of the azimuths of the scan's vertical triangles; the
+#   smallest such turn (|yaw| <= 45 deg) is used. It is folded into level_rot.
 #     level_rot      3x3 rotation matrix R, levelled = R @ original (points.csv / .ply frame)
 #   List cells are written as JSON strings in CSV; an output ending in .pkl keeps them as Python lists.
 
@@ -77,6 +86,8 @@ DIR_NAMES = ["N", "S", "E", "W"]
 VERTICAL_NZ_MAX = 0.5  # a hit is a wall when its normal is close to horizontal
 TAG_CLEAR_RADIUS = 0.2  # [m] scan triangles with a vertex this close to a tag are invisible to the rays
 REVIEW_MARGIN = 1.0  # [m] the clearing review shows the scan within this distance of the tags' bounding box
+WALL_YAW_BINS = 180  # 0.5 deg histogram bins over the 90 deg wall-direction range
+WALL_YAW_WINDOW_DEG = 5.0  # [deg] the wall direction is refined over normals this close to the histogram peak
 
 
 def sample_permutations(tags, P, rng):
@@ -204,6 +215,36 @@ def level_rotation(points):
     return np.eye(3) + s * Kx + (1 - c) * Kx @ Kx
 
 
+def wall_yaw(mesh):
+    """
+    Dominant wall direction [rad] of a levelled (z-up) scan, modulo 90 deg, in [-45, 45) deg: the
+    area-weighted peak of the azimuths of the vertical triangles' normals, folded onto one quadrant
+    (all four walls of a rectangular room agree), refined by a circular mean around the peak.
+    """
+    v, t = np.asarray(mesh.vertices), np.asarray(mesh.triangles)
+    c = np.cross(v[t[:, 1]] - v[t[:, 0]], v[t[:, 2]] - v[t[:, 0]])
+    area = np.linalg.norm(c, axis=1)
+    ok = area > 1e-12
+    n, area = c[ok] / area[ok, None], area[ok]
+    w = area * (np.abs(n[:, 2]) < VERTICAL_NZ_MAX)
+    if w.sum() <= 0:
+        raise ValueError("no vertical surfaces in the scan; cannot align walls")
+    phi = np.mod(np.arctan2(n[:, 1], n[:, 0]), np.pi / 2)
+    hist, edges = np.histogram(phi, bins=WALL_YAW_BINS, range=(0, np.pi / 2), weights=w)
+    hist = np.convolve(np.r_[hist[-2:], hist, hist[:2]], [1, 2, 3, 2, 1], "valid")  # wraps at 90 deg
+    peak = edges[np.argmax(hist)] + 0.5 * (edges[1] - edges[0])
+    d = np.angle(np.exp(4j * (phi - peak))) / 4  # offset from the peak, modulo 90 deg
+    near = np.abs(d) < np.radians(WALL_YAW_WINDOW_DEG)
+    peak += np.sum(w[near] * d[near]) / np.sum(w[near])
+    return float((peak + np.pi / 4) % (np.pi / 2) - np.pi / 4)
+
+
+def yaw_rotation(yaw):
+    """Rotation about +z by -yaw, so that a wall normal at azimuth `yaw` ends up along +x."""
+    c, s = np.cos(yaw), np.sin(yaw)
+    return np.array([[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]])
+
+
 def load_mesh(ply_path, R=None):
     """Room scan as a legacy TriangleMesh, rotated by R (levelled = R @ original) if given."""
     mesh = o3d.io.read_triangle_mesh(ply_path)
@@ -271,9 +312,8 @@ def review_clearing(mesh, removed, points, radius, title):
             sys.exit("aborted during clearing review")
 
 
-def load_scene(ply_path, R=None, clear_points=None, clear_radius=TAG_CLEAR_RADIUS, review=False):
-    """Raycasting scene of the room scan, or None when the clearing review rejects it."""
-    mesh = load_mesh(ply_path, R)
+def load_scene(mesh, ply_path, clear_points=None, clear_radius=TAG_CLEAR_RADIUS, review=False):
+    """Raycasting scene of the (levelled) room scan, or None when the clearing review rejects it."""
     if clear_points is not None:
         mesh, removed = clear_around(mesh, clear_points, clear_radius)
         if review and clear_radius > 0 and not review_clearing(
@@ -284,21 +324,46 @@ def load_scene(ply_path, R=None, clear_points=None, clear_radius=TAG_CLEAR_RADIU
     return scene
 
 
-def build(df, K, P, rng, base_dir, tag_clear=TAG_CLEAR_RADIUS, review=False):
+def build(df, K, P, rng, base_dir, tag_clear=TAG_CLEAR_RADIUS, review=False, align_walls=False,
+          max_short_links=None):
     rows = []
     for exp, g in df.groupby("experiment", sort=True):
         F, nums, names, xyz, runs, freqs = experiment_tensors(g)
         if K > len(nums):
             raise ValueError(f"experiment {exp}: K={K} > N={len(nums)} tags")
         subs = []  # (combination_id, permutation_id, perm) for this experiment
+        n_combos = n_dropped = 0
         for ci, combo in enumerate(itertools.combinations(nums, K)):
+            n_combos += 1
+            if max_short_links is not None:
+                X, Y = max_short_links
+                n_short = sum(np.linalg.norm(np.subtract(xyz[i], xyz[j])) < Y
+                              for i, j in itertools.combinations(combo, 2))
+                if n_short > X:
+                    n_dropped += 1
+                    continue
             for pi, perm in enumerate(sample_permutations(list(combo), P, rng)):
                 subs.append((ci, pi, [int(t) for t in perm]))
+        if max_short_links is not None:
+            print(f"experiment {exp}: dropped {n_dropped}/{n_combos} combinations with more than "
+                  f"{max_short_links[0]} links < {max_short_links[1]} m")
+        if not subs:
+            print(f"experiment {exp}: skipped (no combinations left)")
+            continue
         R = level_rotation([xyz[t] for t in nums])
-        xyz = {t: (R @ np.asarray(p)).tolist() for t, p in xyz.items()}
         tilt = np.degrees(np.arccos(np.clip(R[2, 2], -1.0, 1.0)))
-        print(f"experiment {exp}: levelled by {tilt:.2f} deg")
-        scene = load_scene(os.path.join(base_dir, PLY_PATHS[str(exp)]), R,
+        ply_path = os.path.join(base_dir, PLY_PATHS[str(exp)])
+        mesh = load_mesh(ply_path, R)
+        msg = f"experiment {exp}: levelled by {tilt:.2f} deg"
+        if align_walls:
+            yaw = wall_yaw(mesh)
+            Rz = yaw_rotation(yaw)
+            mesh.rotate(Rz, center=(0.0, 0.0, 0.0))
+            R = Rz @ R
+            msg += f", walls aligned by turning {-np.degrees(yaw):+.2f} deg about z"
+        print(msg)
+        xyz = {t: (R @ np.asarray(p)).tolist() for t, p in xyz.items()}
+        scene = load_scene(mesh, ply_path,
                            clear_points=[xyz[t] for t in nums], clear_radius=tag_clear, review=review)
         if scene is None:
             print(f"experiment {exp}: skipped (clearing rejected)")
@@ -344,10 +409,23 @@ if __name__ == "__main__":
                     help="radius [m] around each tag whose scan geometry the rays ignore (0 disables)")
     ap.add_argument("--no-review", action="store_true",
                     help="skip the per-experiment visual approval of the tag clearing")
+    ap.add_argument("--align-walls", action="store_true",
+                    help="turn each levelled room about z so its walls are parallel to the x / y axes")
+    ap.add_argument("--max-short-links", nargs=2, type=float, metavar=("X", "Y"), default=None,
+                    help="drop combinations with more than X links shorter than Y meters")
     args = ap.parse_args()
     if args.K < 2 or args.P < 1:
         sys.exit("need K >= 2 and P >= 1")
-    out_path = args.output or os.path.join(here, f"cluster_features_K{args.K}_P{args.P}.csv")
+    short = None
+    if args.max_short_links is not None:
+        X, Y = args.max_short_links
+        if X < 0 or X != int(X) or Y <= 0:
+            sys.exit("--max-short-links needs an integer X >= 0 and Y > 0")
+        short = (int(X), Y)
+    suffix = "_aligned" if args.align_walls else ""
+    if short is not None:
+        suffix += f"_short{short[0]}lt{short[1]:g}m"
+    out_path = args.output or os.path.join(here, f"cluster_features_K{args.K}_P{args.P}{suffix}.csv")
 
     df = pd.read_csv(args.input)
     missing = set(SUBDIRS) - set(df.experiment.astype(str))
@@ -356,7 +434,7 @@ if __name__ == "__main__":
         sys.exit(f"subdirectories missing from {args.input} or PLY_PATHS: {sorted(missing)}")
     df = df[df.experiment.astype(str).isin(SUBDIRS)]
     out = build(df, args.K, args.P, np.random.default_rng(args.seed), here, args.tag_clear,
-                review=not args.no_review)
+                review=not args.no_review, align_walls=args.align_walls, max_short_links=short)
     if out.empty:
         sys.exit("no experiments accepted; nothing saved")
     if out_path.endswith(".pkl"):

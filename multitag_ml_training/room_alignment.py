@@ -303,57 +303,89 @@ class RoomAlignment:
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
+def _sub(a: np.ndarray, e: int) -> np.ndarray:
+    """Deterministic per-experiment subsample of N_REG rows (independent of run order)."""
+    rng = np.random.default_rng(int(e))
+    return a[rng.choice(len(a), min(N_REG, len(a)), replace=False)]
+
+
+def _load_job(e: int, ply_path: str, R: np.ndarray) -> tuple[int, np.ndarray, float]:
+    """Worker: (exp, (m, 6) wall points [xyz, normal], floor z)."""
+    p = load_scan_points(ply_path, R)
+    return e, p[np.abs(p[:, 5]) < WALL_NZ_MAX], floor_height(p)
+
+
+def _register_job(e: int, src: np.ndarray, dst: np.ndarray) -> tuple[int, list]:
+    """Worker: ICP-refined coarse candidates for one experiment, best (lowest score) first."""
+    tree = cKDTree(dst)
+    fits = sorted((icp_2d(src, tree, th, t) for _, th, t in coarse_search(src, dst)),
+                  key=lambda f: f[4])
+    return e, fits
+
+
+def _pool(n_workers: int):
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor
+    # spawn: open3d / BLAS are not fork-safe; the workers only need this module.
+    return ProcessPoolExecutor(max_workers=n_workers, mp_context=mp.get_context("spawn"))
+
+
 def compute_alignment(level_rot: dict[int, np.ndarray], ref: int | None = None,
-                      verbose: bool = True) -> RoomAlignment:
+                      verbose: bool = True, n_workers: int | None = None) -> RoomAlignment:
+    """
+    Scan loading and per-experiment registration run in parallel worker
+    processes (n_workers, default: one per experiment up to the CPU count;
+    n_workers=1 runs everything in-process).
+    """
+    from concurrent.futures import as_completed
     paths = _ply_paths()
     exps = sorted(level_rot)
-    rng = np.random.default_rng(0)
-    pts, walls, floors = {}, {}, {}
-    for e in exps:
-        p = load_scan_points(paths[str(e)], level_rot[e])
-        pts[e], walls[e], floors[e] = p, wall_points(p), floor_height(p)
-        if verbose:
-            print(f"[align] exp {e:>2}: {len(walls[e]):>6} wall points, floor z = {floors[e]:+.3f} m")
+    n_workers = n_workers or min(len(exps), os.cpu_count() or 1)
 
-    def sub(a):
-        return a[rng.choice(len(a), min(N_REG, len(a)), replace=False)]
+    def run(jobs):
+        """jobs: [(fn, *args)] → results as they finish (in-process if n_workers == 1)."""
+        if n_workers == 1:
+            yield from (fn(*a) for fn, *a in jobs)
+            return
+        with _pool(n_workers) as ex:
+            yield from (f.result() for f in as_completed([ex.submit(fn, *a) for fn, *a in jobs]))
+
+    walls, floors = {}, {}
+    for e, w, fz in run([(_load_job, e, paths[str(e)], level_rot[e]) for e in exps]):
+        walls[e], floors[e] = w, fz
+        if verbose:
+            print(f"[align] exp {e:>2}: {len(w):>6} wall points, floor z = {fz:+.3f} m", flush=True)
 
     # Reference: the scan whose walls overlap best with all others is safest, but
     # any complete scan works; default to the one with the most wall points.
     ref = int(ref) if ref is not None else max(exps, key=lambda e: len(walls[e]))
-    dst = sub(walls[ref][:, :2])
-    tree = cKDTree(dst)
+    dst = _sub(walls[ref][:, :2], ref)
 
-    yaw, t2, rows = {}, {}, []
-    for e in exps:
-        if e == ref:
-            yaw[e], t2[e] = 0.0, np.zeros(2)
-            rows.append(dict(experiment=e, median_resid_cm=0.0, inlier_10cm=1.0, score_cm=0.0,
-                             runner_up_yaw_deg=np.nan, runner_up_score_cm=np.nan,
-                             floor_z=floors[e]))
-            continue
-        src = sub(walls[e][:, :2])
-        fits = sorted((icp_2d(src, tree, th, t) for _, th, t in coarse_search(src, dst)),
-                      key=lambda f: f[4])
+    yaw, t2, rows = {ref: 0.0}, {ref: np.zeros(2)}, {}
+    rows[ref] = dict(experiment=ref, median_resid_cm=0.0, inlier_10cm=1.0, score_cm=0.0,
+                     runner_up_yaw_deg=np.nan, runner_up_score_cm=np.nan, floor_z=floors[ref])
+    jobs = [(_register_job, e, _sub(walls[e][:, :2], e), dst) for e in exps if e != ref]
+    for e, fits in run(jobs):
         th, t, med, inl, score = fits[0]
         yaw[e], t2[e] = th, t
         # Runner-up: the best candidate that converged to a genuinely different yaw
         # (several coarse peaks usually converge to the same solution).
         other = [f for f in fits[1:] if abs((f[0] - th + np.pi) % (2 * np.pi) - np.pi) > np.radians(5)]
-        rows.append(dict(experiment=e, median_resid_cm=100 * med, inlier_10cm=inl, score_cm=100 * score,
-                         runner_up_yaw_deg=np.degrees(other[0][0] - th) if other else np.nan,
-                         runner_up_score_cm=100 * other[0][4] if other else np.nan,
-                         floor_z=floors[e]))
+        rows[e] = dict(experiment=e, median_resid_cm=100 * med, inlier_10cm=inl, score_cm=100 * score,
+                       runner_up_yaw_deg=np.degrees(other[0][0] - th) if other else np.nan,
+                       runner_up_score_cm=100 * other[0][4] if other else np.nan,
+                       floor_z=floors[e])
         if verbose:
-            r = rows[-1]
+            r = rows[e]
             print(f"[align] exp {e:>2} → {ref}: yaw {np.degrees(th):+7.2f}°  "
                   f"t ({t[0]:+.2f}, {t[1]:+.2f}) m  median {100 * med:.1f} cm  "
                   f"inliers {inl:.0%}  score {100 * score:.2f} cm  (runner-up at "
-                  f"{r['runner_up_yaw_deg']:+.0f}°: score {r['runner_up_score_cm']:.2f} cm)")
+                  f"{r['runner_up_yaw_deg']:+.0f}°: score {r['runner_up_score_cm']:.2f} cm)", flush=True)
+    rows = [rows[e] for e in exps]
 
     # Room frame: reference turned so its walls are axis-aligned, corner at the
     # origin, floor at z = 0.
-    nref = pts[ref][np.abs(pts[ref][:, 5]) < WALL_NZ_MAX, 3:5]
+    nref = walls[ref][:, 3:5]
     phi = -dominant_wall_yaw(nref)
     Rphi = _rot2(phi)
     ref_xy = walls[ref][:, :2] @ Rphi.T
@@ -367,7 +399,7 @@ def compute_alignment(level_rot: dict[int, np.ndarray], ref: int | None = None,
     al = RoomAlignment(yaw=yaw_room, t=t_room, ref=ref,
                        quality=pd.DataFrame(rows).set_index("experiment"))
     for e in exps:
-        walls_room[e] = al.to_room(e, sub(walls[e])).astype(np.float32)
+        walls_room[e] = al.to_room(e, _sub(walls[e][:, :3], e)).astype(np.float32)
     al.walls_room = walls_room
     return al
 
@@ -382,7 +414,8 @@ def _stamp(level_rot: dict) -> list:
 
 
 def load_alignment(dataset_csv: str, ref: int | None = None, recompute: bool = False,
-                   cache_path: str | None = None, verbose: bool = True) -> RoomAlignment:
+                   cache_path: str | None = None, verbose: bool = True,
+                   n_workers: int | None = None) -> RoomAlignment:
     """
     Alignment for every experiment in `dataset_csv`, from cache when the scans
     are unchanged. The cache also stores the aligned wall points (an .npz next
@@ -406,7 +439,7 @@ def load_alignment(dataset_csv: str, ref: int | None = None, recompute: bool = F
     if verbose:
         print(f"[align] reading level_rot from {dataset_csv}")
     level_rot = read_level_rotations(dataset_csv)
-    al = compute_alignment(level_rot, ref=ref, verbose=verbose)
+    al = compute_alignment(level_rot, ref=ref, verbose=verbose, n_workers=n_workers)
     d = al.to_json() | {"dataset": os.path.abspath(dataset_csv),
                         "level_rot": {str(k): v.tolist() for k, v in level_rot.items()},
                         "stamp": _stamp(level_rot)}
@@ -445,9 +478,10 @@ if __name__ == "__main__":
     ap.add_argument("dataset", help="cluster_features_K*_P*.csv")
     ap.add_argument("--ref", type=int, default=None, help="reference experiment")
     ap.add_argument("--recompute", action="store_true")
+    ap.add_argument("--workers", type=int, default=None, help="parallel processes (1 = serial)")
     ap.add_argument("--plot", default=None, help="save the alignment check figure here")
     a = ap.parse_args()
-    al = load_alignment(a.dataset, ref=a.ref, recompute=a.recompute)
+    al = load_alignment(a.dataset, ref=a.ref, recompute=a.recompute, n_workers=a.workers)
     print(al.quality.round(3).to_string())
     if a.plot:
         al.plot_check().savefig(a.plot, dpi=80)
