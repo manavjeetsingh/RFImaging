@@ -23,18 +23,25 @@ import open3d as o3d
 # Scenes to merge. The first one is the reference frame.
 # ----------------------------------------------------------------------------
 SCENE_PATHS = [
-    "roomscans/mapping_2214_1.ply",
-    "roomscans/mapping_2214_2.ply",
-    "roomscans/mapping_2214_3.ply",
-    "roomscans/mapping_2214_4.ply",
-    "roomscans/mapping_2214_5.ply",
+    "roomscans/mapping_2214_1_marked.ply",
+    "roomscans/mapping_2214_2_marked.ply",
+    "roomscans/mapping_2214_3_marked.ply",
+    "roomscans/mapping_2214_4_marked.ply",
+    "roomscans/mapping_2214_5_marked.ply",
+    # "roomscans/mapping_2214_3.ply",
+    # "roomscans/mapping_2214_4.ply",
+    # "roomscans/mapping_2214_5.ply",
 ]
 # All outputs go to OUTPUT_DIR; if it does not exist, to the folder of the first scene.
-OUTPUT_DIR = "/Users/manavjeet/git/RFImaging/faster_multitag/roomscans/merged_out"
+OUTPUT_DIR = "/Users/manavjeet/git/RFImaging/organized_multitag/roomscans/merged_out"
 OUTPUT_NAME = "merged.ply"
 SAVE_ALIGNED = True          # also write <name>_aligned.ply for every input
 SAVE_ADDED = True            # also write merged_added.ply (only the added parts)
 SAVE_HIGHLIGHT = True        # also write merged_highlight.ply (added parts painted red)
+# Marker CSVs from markLocations.py (<scan>_markers.csv, index,x,y,z) are looked up
+# next to each scene ("_marked" suffix dropped), transformed into the merged frame
+# and written to merged_markers.csv (index,x,y,z,scene).
+MERGE_MARKERS = True
 
 # Leveling
 UP_AXIS_HINT = None          # None = auto, or e.g. [0, 0, 1] / [0, 1, 0] in the input frame
@@ -459,6 +466,30 @@ def existing_points(mesh):
     return pcd
 
 
+def markers_path(scene_path):
+    base = os.path.splitext(scene_path)[0]
+    if base.endswith("_marked"):
+        base = base[:-len("_marked")]
+    return base + "_markers.csv"
+
+
+def load_markers(path):
+    """(indices, Nx3 points) from a markers CSV, or None if it does not exist."""
+    if not os.path.isfile(path):
+        return None
+    a = np.loadtxt(path, delimiter=",", skiprows=1, ndmin=2)
+    return a[:, 0].astype(int), a[:, 1:4]
+
+
+def save_markers(path, ids, pts, scenes=None):
+    rows = np.column_stack([ids, pts]).astype(object)
+    header, fmt = "index,x,y,z", ["%d", "%.6f", "%.6f", "%.6f"]
+    if scenes is not None:
+        rows = np.column_stack([rows, scenes])
+        header += ",scene"; fmt.append("%s")
+    np.savetxt(path, rows, delimiter=",", fmt=fmt, header=header, comments="")
+
+
 def main():
     o3d.utility.random.seed(0)
     np.random.seed(0)
@@ -472,14 +503,17 @@ def main():
     out_path = os.path.join(out_dir, OUTPUT_NAME)
 
     meshes = []
+    transforms = []  # input frame -> merged frame, per scene
     for p in paths:
         print(f"[load] {p}")
         m = o3d.io.read_triangle_mesh(p)
         if not m.has_triangles():
             raise ValueError(f"{p} has no faces; this script expects meshes")
         print("  leveling")
-        m.transform(level_transform(m))
+        L = level_transform(m)
+        m.transform(L)
         meshes.append(m)
+        transforms.append(L)
 
     ref_pcd = to_pcd(meshes[0])
     for i in range(1, len(meshes)):
@@ -487,11 +521,33 @@ def main():
         src_pcd = to_pcd(meshes[i])
         T = align_2d(src_pcd, ref_pcd)
         meshes[i].transform(T)
+        transforms[i] = T @ transforms[i]
 
     if SAVE_ALIGNED:
         for p, m in zip(paths, meshes):
             q = os.path.join(out_dir, os.path.splitext(os.path.basename(p))[0] + "_aligned.ply")
             o3d.io.write_triangle_mesh(q, m)
+            print(f"[save] {q}")
+
+    if MERGE_MARKERS:
+        all_ids, all_pts, all_scenes = [], [], []
+        for p, T in zip(paths, transforms):
+            mk = load_markers(markers_path(p))
+            if mk is None:
+                print(f"[markers] none for {os.path.basename(p)}")
+                continue
+            ids, pts = mk
+            pts = pts @ T[:3, :3].T + T[:3, 3]
+            name = os.path.splitext(os.path.basename(p))[0]
+            print(f"[markers] {len(ids)} from {os.path.basename(markers_path(p))}")
+            if SAVE_ALIGNED:
+                q = os.path.join(out_dir, name + "_markers_aligned.csv")
+                save_markers(q, ids, pts)
+                print(f"[save] {q}")
+            all_ids.append(ids); all_pts.append(pts); all_scenes += [name] * len(ids)
+        if all_ids:
+            q = os.path.splitext(out_path)[0] + "_markers.csv"
+            save_markers(q, np.concatenate(all_ids), np.vstack(all_pts), all_scenes)
             print(f"[save] {q}")
 
     merged = o3d.geometry.TriangleMesh(meshes[0])
