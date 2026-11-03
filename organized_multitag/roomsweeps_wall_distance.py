@@ -12,8 +12,9 @@ one column) gives one sample per experiment (--dedup: only the first). θ̂ and 
 
     α̂12 = ½ (β̂1 / V̂2 + β̂2 / V̂1)        θ̂12 = ((Θ̂1 + Θ̂2) / 2) mod π
 
-One sample = one link, with θ̂ and α̂ the median over its runs. Features: θ̂ unwrapped along frequency (mod-π jumps removed, starting in
-[0, π) at the lowest frequency, or at 0 with --zero-start; raw mod-π values with --no-unwrap), α̂ per frequency (unless --no-attn), a one-hot of the link direction and a one-hot of the link length. The label pairs are split 70 / 30 at random
+One sample = one link, with θ̂ and α̂ the median over its runs at the frequencies in --freq-min … --freq-max
+(default 775–955 MHz, the same as roomsweeps_wall_distance_fit.py). Features: θ̂ unwrapped along frequency (mod-π jumps removed, starting in
+[0, π) at the lowest frequency, or at 0 with --zero-start; raw mod-π values with --no-unwrap), α̂ per frequency (unless --no-attn); the link direction and length are never features. The label pairs are split 70 / 30 at random
 into train and test, so every experiment's copy of a link lands on the same side. Fits an SVR and an MLP and compares them with predicting the training mean.
 
     python roomsweeps_wall_distance.py                 # 92 cm links
@@ -24,6 +25,7 @@ into train and test, so every experiment's copy of a link lands on the same side
     python roomsweeps_wall_distance.py --no-unwrap     # raw θ̂ in [0, π)
     python roomsweeps_wall_distance.py --dedup         # each label pair once, from its first experiment
     python roomsweeps_wall_distance.py --loo           # leave one experiment out instead of the random split
+    python roomsweeps_wall_distance.py --max-wall-cm 200   # only links within 200 cm of their closest parallel wall
 """
 import argparse
 import re
@@ -48,6 +50,7 @@ MESH_PATH = SCAN_DIR / "merged.ply"
 MARKERS_PATH = SCAN_DIR / "merged_markers.csv"
 CACHE_DIR = ROOT / ".cache"
 OUT_DIR = ROOT / "roomsweeps_wall_distance_out"
+FREQ_RANGE = (775, 955)   # MHz, inclusive; default band of this script and roomsweeps_wall_distance_fit.py
 
 TILE_CM = 46.0
 N_ROWS, N_COLS = 8, 17
@@ -163,7 +166,10 @@ def load_bidir(exp):
     csv = next(exp_dir.glob("*.csv"))
     cache = CACHE_DIR / f"bidir_{exp}_{csv.stem}.pkl"
     if cache.exists():
-        return pd.read_pickle(cache)
+        try:
+            return pd.read_pickle(cache)
+        except ModuleNotFoundError:  # written under another numpy major version
+            print(f"  stale cache {cache.name}, rebuilding")
     print(f"  reading {csv.relative_to(ROOT)} …")
     m = bidirectional(load_csv(exp_dir))
     CACHE_DIR.mkdir(exist_ok=True)
@@ -209,9 +215,10 @@ def wall_distance_cm(xy, wall):
 
 # ---------------------------------------------------------------- links and dataset
 
-def parallel_links(positions, exps, n_tiles, walls, dedup=False):
-    """Every tag pair whose labels are n tiles apart (n in n_tiles) along one grid direction, with its closest parallel wall.
-    A label pair measured in several experiments gives one row per experiment; with dedup only the first one in `exps`."""
+def parallel_links(positions, exps, n_tiles, walls, dedup=False, max_wall_cm=None):
+    """Every tag pair whose labels are n tiles apart (n in n_tiles) along one grid direction, with its closest parallel wall,
+    leaving out links more than max_wall_cm from that wall. A label pair measured in several experiments gives one row
+    per experiment; with dedup only the first one in `exps`."""
     rows, seen = [], set()
     for exp in exps:
         pos = positions[exp]
@@ -226,13 +233,15 @@ def parallel_links(positions, exps, n_tiles, walls, dedup=False):
                     direction, n = 0, abs(ca - cb)
                 else:
                     continue
+                mid = (grid_xy(ca, ra) + grid_xy(cb, rb)) / 2
+                dists = {name: wall_distance_cm(mid, w) for name, w in walls.items() if w[2] == direction}
+                wall = min(dists, key=dists.get)
+                if max_wall_cm is not None and dists[wall] > max_wall_cm:
+                    continue
                 key = tuple(sorted((la, lb)))
                 if dedup and key in seen:
                     continue
                 seen.add(key)
-                mid = (grid_xy(ca, ra) + grid_xy(cb, rb)) / 2
-                dists = {name: wall_distance_cm(mid, w) for name, w in walls.items() if w[2] == direction}
-                wall = min(dists, key=dists.get)
                 rows.append({"exp": exp, "T1": ta, "T2": tb, "label_a": la, "label_b": lb,
                              "part": link_part(ca, ra, cb, rb), "n_tiles": n, "direction": direction, "wall": wall, "wall_cm": dists[wall],
                              "scan_length_cm": 100 * np.linalg.norm(grid_xy(ca, ra) - grid_xy(cb, rb))})
@@ -255,17 +264,21 @@ def median_phase(theta, unwrap=True):
     return med if unwrap else med % np.pi
 
 
-def build_dataset(links, bidir, freq_range, use_attn=True, zero_start=False, n_tiles=(2,), unwrap=True):
+def link_runs(bidir, link, freq_range):
+    """(θ̂, α̂) of a link as (run × freq) frames over freq_range, keeping the runs with every frequency in both."""
+    m = bidir[link.exp]
+    m = m[(m["T1"] == link.T1) & (m["T2"] == link.T2) & (m["freq"] >= freq_range[0]) & (m["freq"] <= freq_range[1])]
+    theta = m.pivot(index="run", columns="freq", values="THETA").dropna()
+    alpha = m.pivot(index="run", columns="freq", values="alpha").loc[theta.index].dropna()
+    return theta.loc[alpha.index], alpha
+
+
+def build_dataset(links, bidir, freq_range, use_attn=True, zero_start=False, unwrap=True):
     """One row per link (median over its runs): θ̂ unwrapped along frequency if unwrap, else mod π (minus its
-    first value if zero_start), α̂ per frequency (if use_attn), direction one-hot, length one-hot (over n_tiles)."""
+    first value if zero_start), α̂ per frequency (if use_attn). No direction or length features."""
     X, y, meta = [], [], []
     for _, link in links.iterrows():
-        m = bidir[link.exp]
-        m = m[(m["T1"] == link.T1) & (m["T2"] == link.T2)
-              & (m["freq"] >= freq_range[0]) & (m["freq"] <= freq_range[1])]
-        theta = m.pivot(index="run", columns="freq", values="THETA").dropna()
-        alpha = m.pivot(index="run", columns="freq", values="alpha").loc[theta.index].dropna()
-        theta = theta.loc[alpha.index]                # runs with every frequency in both
+        theta, alpha = link_runs(bidir, link, freq_range)
         if theta.empty:
             continue
         freqs = theta.columns.to_numpy()
@@ -273,8 +286,7 @@ def build_dataset(links, bidir, freq_range, use_attn=True, zero_start=False, n_t
         if zero_start:
             th = th - th[0]
         al = np.median(alpha.to_numpy(), axis=0)
-        X.append(np.concatenate(([th, al] if use_attn else [th]) + [np.eye(2)[link.direction],
-                                 np.eye(len(n_tiles))[list(n_tiles).index(link.n_tiles)]]))
+        X.append(np.concatenate([th, al] if use_attn else [th]))
         y.append(link.wall_cm)
         meta.append({**link.to_dict(), "n_runs": len(theta)})
     return np.array(X), np.array(y), pd.DataFrame(meta), freqs
@@ -356,10 +368,10 @@ def plot_predictions(y_test, preds, meta_test, path, title):
     present = set(meta_test["part"])
     part_colors = {part: PART_COLORS[i % len(PART_COLORS)]
                    for i, part in enumerate(p for p in order if p in present)}
-    lo, hi = min(y_test.min(), *(p.min() for p in preds.values())), max(y_test.max(), *(p.max() for p in preds.values()))
-    pad = 0.05 * (hi - lo)
+    hi = max(y_test.max(), *(p.max() for p in preds.values()))
+    pad = 0.05 * hi                              # axes start at 0 (distances are non-negative)
     for ax, (name, p) in zip(axes.flat, preds.items()):
-        ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], color="#9a9a9a", lw=1, ls="--", zorder=1)
+        ax.plot([0, hi + pad], [0, hi + pad], color="#9a9a9a", lw=1, ls="--", zorder=1)
         for part, color in part_colors.items():
             for d, marker in DIRECTION_MARKERS.items():
                 sel = (meta_test["part"].to_numpy() == part) & (meta_test["direction"].to_numpy() == d)
@@ -369,8 +381,8 @@ def plot_predictions(y_test, preds, meta_test, path, title):
         ax.set_title(f"{name}  (test MAE {mae:.1f} cm)", fontsize=11)
         ax.set_xlabel("true distance from closest parallel wall (cm)")
         ax.set_ylabel("predicted (cm)")
-        ax.set_xlim(lo - pad, hi + pad)
-        ax.set_ylim(lo - pad, hi + pad)
+        ax.set_xlim(0, hi + pad)
+        ax.set_ylim(0, hi + pad)
         ax.set_aspect("equal")
         ax.grid(color="#e0e0e0", lw=0.8)
         ax.set_axisbelow(True)
@@ -392,8 +404,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--length-cm", default="92",
                     help="link length(s) in cm, comma-separated (e.g. 92,138); each a whole number of tiles")
-    ap.add_argument("--freq-min", type=float, default=775)
-    ap.add_argument("--freq-max", type=float, default=995)
+    ap.add_argument("--freq-min", type=float, default=FREQ_RANGE[0], help="MHz, inclusive")
+    ap.add_argument("--freq-max", type=float, default=FREQ_RANGE[1], help="MHz, inclusive")
     ap.add_argument("--train-frac", type=float, default=0.7)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--attn", action=argparse.BooleanOptionalAction, default=True,
@@ -402,6 +414,8 @@ def main():
                     help="shift each run's unwrapped θ̂ so it is 0 at the lowest frequency")
     ap.add_argument("--unwrap", action=argparse.BooleanOptionalAction, default=True,
                     help="unwrap θ̂ along frequency (--no-unwrap: raw θ̂ in [0, π))")
+    ap.add_argument("--max-wall-cm", type=float, default=None,
+                    help="ignore links whose midpoint is more than this many cm from the closest parallel wall")
     ap.add_argument("--dedup", action="store_true",
                     help="keep each label pair once, from the first experiment that measured it")
     ap.add_argument("--loo", action="store_true",
@@ -428,7 +442,9 @@ def main():
         edge = grid_xy(0, 0) if "col 0" in name or "row 1" in name else grid_xy(N_COLS - 1, N_ROWS - 1)
         print(f"  {name:<30} {wall_distance_cm(edge, w):6.1f} cm")
 
-    links = parallel_links(positions, exps, n_tiles, walls, args.dedup)
+    links = parallel_links(positions, exps, n_tiles, walls, args.dedup, args.max_wall_cm)
+    if links.empty:
+        raise SystemExit("no links match --length-cm / --max-wall-cm")
     print(f"\n{len(links)} links ({links.groupby(['label_a', 'label_b']).ngroups} label pairs) of {'/'.join(map(str, n_tiles))} tiles ({'/'.join(lengths_cm)} cm; "
           f"{links.scan_length_cm.min():.0f}–{links.scan_length_cm.max():.0f} cm in the scan)")
     print(links.groupby(["n_tiles", "direction", "wall"]).agg(links=("exp", "size"), min_cm=("wall_cm", "min"),
@@ -436,14 +452,14 @@ def main():
 
     print("\nloading θ̂, α̂ …")
     bidir = {e: load_bidir(e) for e in exps}
-    X, y, meta, freqs = build_dataset(links, bidir, (args.freq_min, args.freq_max), args.attn, args.zero_start, n_tiles, args.unwrap)
+    X, y, meta, freqs = build_dataset(links, bidir, (args.freq_min, args.freq_max), args.attn, args.zero_start, args.unwrap)
     print(f"{len(X)} samples (one per link and experiment, median over {meta.n_runs.min()}–{meta.n_runs.max()} runs), {X.shape[1]} features: θ̂{'' if args.unwrap else ' (wrapped)'}{' (start at 0)' if args.zero_start else ''}{' + α̂' if args.attn else ''} at "
-          f"{len(freqs)} freqs {freqs.min()}–{freqs.max()} MHz + direction + length")
+          f"{len(freqs)} freqs {freqs.min()}–{freqs.max()} MHz")
 
     te, preds = evaluate(X, y, meta, args.train_frac, args.seed, args.loo)
 
     OUT_DIR.mkdir(exist_ok=True)
-    tag = "-".join(lengths_cm) + "cm" + ("" if args.attn else "_phase_only") + ("_zero_start" if args.zero_start else "") + ("" if args.unwrap else "_no_unwrap") + ("_dedup" if args.dedup else "") + ("_loo" if args.loo else "")
+    tag = "-".join(lengths_cm) + "cm" + ("" if args.attn else "_phase_only") + ("_zero_start" if args.zero_start else "") + ("" if args.unwrap else "_no_unwrap") + ("_dedup" if args.dedup else "") + ("_loo" if args.loo else "") + (f"_max{args.max_wall_cm:g}cm" if args.max_wall_cm is not None else "")
     out = meta.iloc[te].reset_index(drop=True).assign(**{f"pred_{k}": v for k, v in preds.items()})
     out.to_csv(OUT_DIR / f"test_predictions_{tag}.csv", index=False)
     plot_predictions(y[te], preds, meta.iloc[te],
