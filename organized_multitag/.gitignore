@@ -3,4 +3,8 @@ roomsweeps_wall_distance_fit_out
 roomsweeps_wall_distance_out
 gridsim_wall_distance_fit_out
 gridsim_wall_distance_out
+roomsweeps_wall_distance_posttrain_out
 .cache
+new_wall_models
+roomsweeps_wall_distance_alllinks_out
+reconstruction_out

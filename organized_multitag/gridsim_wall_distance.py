@@ -22,7 +22,9 @@ tractable. Fits an SVR, an MLP and a small transformer and compares them with pr
 The transformer reads one token per frequency (θ̂ and α̂ at that frequency, channels standardized over all frequencies so
 the shape of the curve survives) plus a learned position per frequency, and a leading read-out token (learned, plus a
 projection of the per-link features when a script has any, e.g. the sine fit), whose output feeds the regression head.
-It trains on the same rows as the SVR and MLP.
+It trains on the same rows as the SVR and MLP. --save-model writes it (weights, standardization and the feature
+settings) to a .pt file that roomsweeps_wall_distance_posttrain.py post-trains on the real links; with --kfold the saved
+model is refitted on every simulation (subsampled to --max-train) after the cross-validation.
 
     python gridsim_wall_distance.py                       # links 69–115 cm long (≈ the real 92 cm links)
     python gridsim_wall_distance.py --length-cm 46,92,138 # links 23–161 cm long in one dataset
@@ -33,8 +35,11 @@ It trains on the same rows as the SVR and MLP.
     python gridsim_wall_distance.py --kfold 5             # 5-fold cross-validation over simulations instead of one split
     python gridsim_wall_distance.py --no-transformer      # SVR and MLP only
     python gridsim_wall_distance.py --max-wall-cm 200     # only links within 200 cm of their closest parallel wall
+    python gridsim_wall_distance.py --save-model          # also write gridsim_wall_distance_out/transformer_<tag>.pt
+    python gridsim_wall_distance.py --save-model my.pt    # … or to my.pt
 """
 import argparse
+import copy
 import re
 from pathlib import Path
 
@@ -158,12 +163,13 @@ class FreqTransformer(nn.Module):
 class TransformerRegressor:
     """sklearn-style fit / predict around FreqTransformer. token_cols (channels, freqs) are the columns of X that form
     the frequency tokens; every other column is a per-link feature. Inputs and target are standardized on the training
-    rows; trained with AdamW, a cosine learning rate and the Huber loss for a fixed number of epochs."""
+    rows; trained with AdamW, a cosine learning rate and the Huber loss for a fixed number of epochs. save / load write
+    and read a fitted model, fine_tune trains a copy further (e.g. on real links, roomsweeps_wall_distance_posttrain.py)."""
 
-    def __init__(self, token_cols, epochs=100, batch_size=256, lr=1e-3, weight_decay=1e-2, seed=0, **arch):
+    def __init__(self, token_cols, epochs=100, batch_size=256, lr=1e-3, weight_decay=1e-2, seed=0, log_every=25, **arch):
         self.token_cols = np.asarray(token_cols)
-        self.epochs, self.batch_size, self.lr, self.weight_decay, self.seed, self.arch = \
-            epochs, batch_size, lr, weight_decay, seed, arch
+        self.epochs, self.batch_size, self.lr, self.weight_decay, self.seed, self.log_every, self.arch = \
+            epochs, batch_size, lr, weight_decay, seed, log_every, arch
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def _tensors(self, X):
@@ -172,34 +178,80 @@ class TransformerRegressor:
         link = (X[:, link_cols] - self.link_mu) / self.link_sd
         return [torch.as_tensor(a, dtype=torch.float32, device=self.device) for a in (tokens, link)]
 
-    def fit(self, X, y):
-        torch.manual_seed(self.seed)
+    def _set_norm(self, X, y):
         link_cols = np.setdiff1d(np.arange(X.shape[1]), self.token_cols.ravel())
         tokens = X[:, self.token_cols]
         self.tok_mu, self.tok_sd = tokens.mean(axis=(0, 2)), tokens.std(axis=(0, 2)) + 1e-8
         self.link_mu, self.link_sd = X[:, link_cols].mean(axis=0), X[:, link_cols].std(axis=0) + 1e-8
         self.y_mu, self.y_sd = y.mean(), y.std()
+
+    def _train(self, X, y, params, epochs, batch_size, lr, weight_decay, label="transformer"):
         tokens, link = self._tensors(X)
         target = torch.as_tensor((y - self.y_mu) / self.y_sd, dtype=torch.float32, device=self.device)
-
-        self.model = FreqTransformer(len(self.token_cols), self.token_cols.shape[1], len(link_cols),
-                                     **self.arch).to(self.device)
-        opt = torch.optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-        steps = -(-len(y) // self.batch_size)
-        sched = torch.optim.lr_scheduler.OneCycleLR(opt, self.lr, total_steps=self.epochs * steps, pct_start=0.05)
-        for epoch in range(self.epochs):
+        opt = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
+        steps = -(-len(y) // batch_size)
+        sched = torch.optim.lr_scheduler.OneCycleLR(opt, lr, total_steps=epochs * steps, pct_start=0.05)
+        for epoch in range(epochs):
             self.model.train()
             perm, total = torch.randperm(len(y), device=self.device), 0.0
-            for b in perm.split(self.batch_size):
+            for b in perm.split(batch_size):
                 loss = nn.functional.huber_loss(self.model(tokens[b], link[b]), target[b])
                 opt.zero_grad()
                 loss.backward()
                 opt.step()
                 sched.step()
                 total += loss.item() * len(b)
-            if (epoch + 1) % 25 == 0 or epoch + 1 == self.epochs:
-                print(f"  transformer epoch {epoch + 1}/{self.epochs}: train loss {total / len(y):.4f}")
+            if epoch + 1 == epochs or (self.log_every and (epoch + 1) % self.log_every == 0):
+                print(f"  {label} epoch {epoch + 1}/{epochs}: train loss {total / len(y):.4f}")
+
+    def fit(self, X, y):
+        torch.manual_seed(self.seed)
+        self._set_norm(X, y)
+        self.model = FreqTransformer(len(self.token_cols), self.token_cols.shape[1], len(self.link_mu),
+                                     **self.arch).to(self.device)
+        self._train(X, y, self.model.parameters(), self.epochs, self.batch_size, self.lr, self.weight_decay)
         return self
+
+    def fine_tune(self, X, y, epochs=200, batch_size=32, lr=1e-4, weight_decay=1e-2, renorm=False,
+                  freeze_encoder=False, seed=0):
+        """A copy of this fitted regressor trained further on (X, y); self is left unchanged. With renorm the input and
+        target standardization is re-estimated on these rows (else the pretraining one is kept); with freeze_encoder
+        only the regression head is trained."""
+        ft = copy.deepcopy(self)
+        torch.manual_seed(seed)
+        if renorm:
+            ft._set_norm(X, y)
+        for p in ft.model.parameters():
+            p.requires_grad_(not freeze_encoder)
+        for p in ft.model.head.parameters():
+            p.requires_grad_(True)
+        ft._train(X, y, [p for p in ft.model.parameters() if p.requires_grad], epochs, batch_size, lr, weight_decay,
+                  label="post-training")
+        return ft
+
+    NORM_KEYS = ("tok_mu", "tok_sd", "link_mu", "link_sd", "y_mu", "y_sd")
+
+    def save(self, path, **info):
+        """Weights, architecture, standardization and token layout of the fitted model, plus info (the feature settings
+        it was trained with) — loadable with TransformerRegressor.load (torch.load(weights_only=True) safe)."""
+        torch.save({"state_dict": {k: v.detach().cpu() for k, v in self.model.state_dict().items()},
+                    "arch": self.arch, "token_cols": self.token_cols.tolist(),
+                    "norm": {k: torch.as_tensor(np.asarray(getattr(self, k), dtype=np.float64)) for k in self.NORM_KEYS},
+                    "train": {"epochs": self.epochs, "batch_size": self.batch_size, "lr": self.lr,
+                              "weight_decay": self.weight_decay, "seed": self.seed},
+                    "info": info}, path)
+
+    @classmethod
+    def load(cls, path):
+        """(regressor, info) from a file written by save."""
+        ck = torch.load(path, map_location="cpu", weights_only=True)
+        reg = cls(ck["token_cols"], **ck["train"], **ck["arch"])
+        for k in cls.NORM_KEYS:
+            setattr(reg, k, ck["norm"][k].numpy())
+        reg.model = FreqTransformer(len(reg.token_cols), reg.token_cols.shape[1], len(reg.link_mu), **reg.arch)
+        reg.model.load_state_dict(ck["state_dict"])
+        reg.model.to(reg.device)
+        return reg, ck["info"]
 
     @torch.no_grad()
     def predict(self, X):
@@ -223,21 +275,23 @@ def cap(idx, max_n, rng):
     return np.sort(rng.choice(idx, max_n, replace=False)) if max_n and len(idx) > max_n else idx
 
 
-def fit_predict_all(X, y, tr, te, seed, extra_models):
-    """fit_predict, plus every model in extra_models ({name: seed → regressor})."""
+def fit_predict_all(X, y, tr, te, seed, extra_models, fitted=None):
+    """fit_predict, plus every model in extra_models ({name: seed → regressor}), each also stored in fitted (a dict)."""
     preds, train_mae = fit_predict(X, y, tr, te, seed)
     for name, make in extra_models.items():
         model = make(seed).fit(X[tr], y[tr])
+        if fitted is not None:
+            fitted[name] = model
         preds[name] = model.predict(X[te])
         train_mae[name] = mean_absolute_error(y[tr], model.predict(X[tr]))
     return preds, train_mae
 
 
-def evaluate(X, y, meta, train_frac, seed, max_train, kfold=0, extra_models=None):
+def evaluate(X, y, meta, train_frac, seed, max_train, kfold=0, extra_models=None, fitted=None):
     """Random split by simulation, or with kfold K-fold cross-validation over simulations (predictions of every fold
     pooled). The training rows are subsampled to max_train (0: all). extra_models ({name: seed → regressor}) are fitted
-    alongside the SVR and MLP. Prints the results; returns (test row indices, {model: predictions}) without the
-    training mean."""
+    alongside the SVR and MLP and stored in fitted (a dict; with kfold, those of the last fold). Prints the results;
+    returns (test row indices, {model: predictions}) without the training mean."""
     extra_models = extra_models or {}
     rng = np.random.default_rng(seed)
     sims = meta["sim_idx"].to_numpy()
@@ -247,7 +301,7 @@ def evaluate(X, y, meta, train_frac, seed, max_train, kfold=0, extra_models=None
         tr_fit = cap(tr, max_train, rng)
         print(f"train: {len(tr_fit)} of {len(tr)} rows ({n_sims(tr)} simulations)    "
               f"test: {len(te)} rows ({n_sims(te)} simulations)")
-        preds, train_mae = fit_predict_all(X, y, tr_fit, te, seed, extra_models)
+        preds, train_mae = fit_predict_all(X, y, tr_fit, te, seed, extra_models, fitted)
         results = {name: {**metrics(y[te], p), "train MAE (cm)": train_mae.get(name, np.nan)} for name, p in preds.items()}
         print("\ntest set:")
         print(pd.DataFrame(results).T.round(2).to_string())
@@ -257,7 +311,7 @@ def evaluate(X, y, meta, train_frac, seed, max_train, kfold=0, extra_models=None
     pooled, folds = {}, []
     for k, (tr, te) in enumerate(GroupKFold(n_splits=kfold).split(X, groups=sims)):
         tr_fit = cap(tr, max_train, rng)
-        preds, train_mae = fit_predict_all(X, y, tr_fit, te, seed, extra_models)
+        preds, train_mae = fit_predict_all(X, y, tr_fit, te, seed, extra_models, fitted)
         for name, p in preds.items():
             pooled.setdefault(name, np.full(len(y), np.nan))[te] = p
         folds.append({"fold": k, "test sims": n_sims(te), "test rows": len(te), "train rows": len(tr_fit),
@@ -387,9 +441,13 @@ def main():
                     help="shift each link's unwrapped θ̂ so it is 0 at the lowest frequency")
     ap.add_argument("--unwrap", action=argparse.BooleanOptionalAction, default=True,
                     help="unwrap θ̂ along frequency (--no-unwrap: raw θ̂ in [0, π))")
+    ap.add_argument("--save-model", nargs="?", const=True, default=None, metavar="PATH",
+                    help="save the fitted transformer (default path: gridsim_wall_distance_out/transformer_<tag>.pt)")
     args = ap.parse_args()
     if args.zero_start and not args.unwrap:
         ap.error("--zero-start only works with unwrapped phase (drop --no-unwrap)")
+    if args.save_model and not args.transformer:
+        ap.error("--save-model needs the transformer (drop --no-transformer)")
 
     lengths, links = load_links(args)
     X, y, meta, freqs = build_dataset(links, (args.freq_min, args.freq_max), args.attn, args.zero_start, args.unwrap)
@@ -399,14 +457,28 @@ def main():
 
     # frequency tokens: θ̂ in columns 0…F-1, α̂ in F…2F-1
     token_cols = np.arange(len(freqs))[None] + len(freqs) * np.arange(2 if args.attn else 1)[:, None]
+    fitted = {}
     te, preds = evaluate(X, y, meta, args.train_frac, args.seed, args.max_train, args.kfold,
-                         transformer_models(args, token_cols))
+                         transformer_models(args, token_cols), fitted)
 
     tag = (output_tag(args) + ("" if args.attn else "_phase_only") + ("_zero_start" if args.zero_start else "")
            + ("" if args.unwrap else "_no_unwrap"))
     save_outputs(OUT_DIR, tag, y, te, preds, meta,
                  f"simulated {lengths_label(lengths)} links, {phase}{' + α̂' if args.attn else ' only'}: "
                  "distance from closest parallel wall (test set)")
+
+    if args.save_model:
+        model = fitted["Transformer"]          # with the random split: fitted on the training simulations
+        if args.kfold:
+            idx = cap(np.arange(len(y)), args.max_train, np.random.default_rng(args.seed))
+            print(f"\nrefitting the transformer on {len(idx)} rows of all {meta.sim_idx.nunique()} simulations to save it")
+            model = transformer_models(args, token_cols)["Transformer"](args.seed).fit(X[idx], y[idx])
+        path = OUT_DIR / f"transformer_{tag}.pt" if args.save_model is True else Path(args.save_model)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        model.save(path, freqs=freqs.tolist(), attn=args.attn, zero_start=args.zero_start, unwrap=args.unwrap,
+                   freq_min=args.freq_min, freq_max=args.freq_max, length_cm=args.length_cm, exc=args.exc,
+                   max_wall_cm=args.max_wall_cm, kfold=args.kfold, seed=args.seed, tag=tag, data=str(args.data))
+        print(f"wrote {path}")
 
 
 if __name__ == "__main__":

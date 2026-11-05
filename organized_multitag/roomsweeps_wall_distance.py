@@ -15,7 +15,8 @@ one column) gives one sample per experiment (--dedup: only the first). θ̂ and 
 One sample = one link, with θ̂ and α̂ the median over its runs at the frequencies in --freq-min … --freq-max
 (default 775–955 MHz, the same as roomsweeps_wall_distance_fit.py). Features: θ̂ unwrapped along frequency (mod-π jumps removed, starting in
 [0, π) at the lowest frequency, or at 0 with --zero-start; raw mod-π values with --no-unwrap), α̂ per frequency (unless --no-attn); the link direction and length are never features. The label pairs are split 70 / 30 at random
-into train and test, so every experiment's copy of a link lands on the same side. Fits an SVR and an MLP and compares them with predicting the training mean.
+into train and test, so every experiment's copy of a link lands on the same side. With --loo every experiment is held
+out in turn, and the other experiments' copies of its label pairs are dropped from training (--no-loo-dedup: kept). Fits an SVR and an MLP and compares them with predicting the training mean.
 
     python roomsweeps_wall_distance.py                 # 92 cm links
     python roomsweeps_wall_distance.py --length-cm 46  # 1-tile links
@@ -25,6 +26,7 @@ into train and test, so every experiment's copy of a link lands on the same side
     python roomsweeps_wall_distance.py --no-unwrap     # raw θ̂ in [0, π)
     python roomsweeps_wall_distance.py --dedup         # each label pair once, from its first experiment
     python roomsweeps_wall_distance.py --loo           # leave one experiment out instead of the random split
+    python roomsweeps_wall_distance.py --loo --no-loo-dedup  # … keeping the held-out label pairs' other copies in training
     python roomsweeps_wall_distance.py --max-wall-cm 200   # only links within 200 cm of their closest parallel wall
 """
 import argparse
@@ -329,36 +331,46 @@ def fit_predict(X, y, tr, te, seed):
     return preds, train_mae
 
 
-def evaluate(X, y, meta, train_frac, seed, loo=False):
+def evaluate(X, y, meta, train_frac, seed, loo=False, fit_fn=fit_predict, loo_dedup=False, keep_mean=False):
     """Random split by label pair (see split_by_label_pair), or with loo leave one experiment out: train on the
     samples of every other experiment, predict the held-out one, repeat for each experiment and pool the predictions.
-    Prints the results; returns (test sample indices, {model: predictions}) without the training mean."""
+    With loo_dedup the training samples of a label pair that the held-out experiment also measured are dropped, so no
+    test link is seen in training (a link measured again by another experiment is otherwise an easy match).
+    fit_fn(X, y, tr, te, seed) -> ({model: predictions on te}, {model: train MAE}) fits the models.
+    Prints the results; returns (test sample indices, {model: predictions}) without the training mean (with it, as
+    "mean of train", if keep_mean)."""
+    drop = set() if keep_mean else {"mean of train"}
     if not loo:
         tr, te = split_by_label_pair(meta, train_frac, seed)
         print(describe_split(meta, tr, te))
-        preds, train_mae = fit_predict(X, y, tr, te, seed)
+        preds, train_mae = fit_fn(X, y, tr, te, seed)
         results = {name: {**metrics(y[te], p), "train MAE (cm)": train_mae.get(name, np.nan)} for name, p in preds.items()}
         print("\ntest set:")
         print(pd.DataFrame(results).T.round(2).to_string())
-        return te, {k: v for k, v in preds.items() if k != "mean of train"}
+        return te, {k: v for k, v in preds.items() if k not in drop}
 
     exp_of = meta["exp"].to_numpy()
     pair_of = np.array(["-".join(map(str, sorted(p))) for p in zip(meta["label_a"], meta["label_b"])])
     pooled, folds = {}, []
     for exp in dict.fromkeys(exp_of):
         te, tr = np.flatnonzero(exp_of == exp), np.flatnonzero(exp_of != exp)
-        preds, train_mae = fit_predict(X, y, tr, te, seed)
+        repeated = np.isin(pair_of[tr], pair_of[te])
+        if loo_dedup:
+            tr = tr[~repeated]
+        preds, train_mae = fit_fn(X, y, tr, te, seed)
         for name, p in preds.items():
             pooled.setdefault(name, np.full(len(y), np.nan))[te] = p
         folds.append({"exp": exp, "test samples": len(te), "train samples": len(tr),
+                      "train samples dropped" if loo_dedup else "train samples of a test pair": int(repeated.sum()),
                       "test pairs also in train": int(np.isin(pair_of[te], pair_of[tr]).sum()),
                       **{f"{name} MAE": mean_absolute_error(y[te], p) for name, p in preds.items()},
                       **{f"{name} train MAE": v for name, v in train_mae.items()}})
-    print(f"\nleave one experiment out ({len(folds)} folds):")
+    print(f"\nleave one experiment out ({len(folds)} folds"
+          f"{', training samples of the held-out label pairs dropped' if loo_dedup else ''}):")
     print(pd.DataFrame(folds).set_index("exp").round(1).to_string())
     print("\nall held-out predictions pooled:")
     print(pd.DataFrame({name: metrics(y, p) for name, p in pooled.items()}).T.round(2).to_string())
-    return np.arange(len(y)), {k: v for k, v in pooled.items() if k != "mean of train"}
+    return np.arange(len(y)), {k: v for k, v in pooled.items() if k not in drop}
 
 
 def plot_predictions(y_test, preds, meta_test, path, title):
@@ -400,6 +412,110 @@ def plot_predictions(y_test, preds, meta_test, path, title):
     plt.close(fig)
 
 
+GOAL_CM = (10, 15)        # target accuracy band, drawn on the error plots
+BASELINE_COLOR = "#8a8a8a"
+
+
+def plot_errors(y_test, preds, baseline, meta_test, path, title, bin_cm=25):
+    """Where the models are good or bad, against predicting the training mean (baseline), in three panels:
+    the cumulative distribution of |error| (with the GOAL_CM band), the signed error (median and interquartile range)
+    per bin_cm bin of the true distance, and the MAE per closest wall and link length. Also prints the numbers."""
+    colors = dict(zip(preds, PART_COLORS))
+    err = {name: p - y_test for name, p in preds.items()}
+    base_err = baseline - y_test
+    fig, axes = plt.subplots(1, 3, figsize=(19, 5.6), gridspec_kw={"width_ratios": [1, 1.15, 1.1]})
+
+    # 1. cumulative |error|
+    ax = axes[0]
+    ax.axvspan(*GOAL_CM, color="#1baf7a", alpha=0.12, lw=0, zorder=0)
+    ax.text(np.mean(GOAL_CM), 1.0, f"goal\n{GOAL_CM[0]}–{GOAL_CM[1]} cm", ha="center", va="top", fontsize=8,
+            color="#4a4a4a")
+    hi = max(np.abs(base_err).max(), *(np.abs(e).max() for e in err.values()))
+    for name, e, color, ls in [("mean of train", base_err, BASELINE_COLOR, "--"),
+                               *((n, e, colors[n], "-") for n, e in err.items())]:
+        a = np.sort(np.abs(e))
+        within = 100 * (a <= GOAL_CM[1]).mean()
+        ax.step(np.r_[0, a], np.r_[0, np.arange(1, len(a) + 1) / len(a)], where="post", color=color, ls=ls, lw=2,
+                label=f"{name}: {within:.0f}% ≤ {GOAL_CM[1]} cm, median {np.median(a):.0f} cm")
+    ax.set_xlim(0, hi * 1.02)
+    ax.set_ylim(0, 1.02)
+    ax.set_xlabel("absolute error (cm)")
+    ax.set_ylabel("fraction of test links with at most this error")
+    ax.set_title("Cumulative absolute error (left / higher is better)", fontsize=11)
+    ax.legend(frameon=False, fontsize=8, loc="lower right")
+
+    # 2. signed error by true distance
+    ax = axes[1]
+    edges = np.arange(0, y_test.max() + bin_cm, bin_cm)
+    b = np.digitize(y_test, edges) - 1
+    used = [k for k in range(len(edges) - 1) if (b == k).sum() >= 3]
+    centers = np.array([(edges[k] + edges[k + 1]) / 2 for k in used])
+    ax.axhline(0, color="#4a4a4a", lw=1, zorder=1)
+    ax.axhspan(-GOAL_CM[1], GOAL_CM[1], color="#1baf7a", alpha=0.12, lw=0, zorder=0)
+    ax.plot(centers, [np.median(base_err[b == k]) for k in used], color=BASELINE_COLOR, ls="--", lw=2,
+            label="mean of train (median)", zorder=2)
+    width = 0.6 * bin_cm
+    for i, (name, e) in enumerate(err.items()):
+        x = centers + (i - (len(err) - 1) / 2) * width / max(len(err), 1)
+        q = np.array([np.percentile(e[b == k], [25, 50, 75]) for k in used])
+        ax.vlines(x, q[:, 0], q[:, 2], color=colors[name], lw=2, zorder=3)
+        ax.plot(x, q[:, 1], "o", color=colors[name], ms=7, mec="white", mew=1.5, zorder=4,
+                label=f"{name} (median, bar = middle 50 %)")
+    ax.set_xticks(centers)
+    ax.set_xticklabels([f"{edges[k]:.0f}–{edges[k + 1]:.0f}\n({(b == k).sum()})" for k in used], fontsize=8)
+    ax.set_xlabel("true distance from closest parallel wall (cm), (number of test links)")
+    ax.set_ylabel("predicted − true (cm)")
+    ax.set_title("Signed error by true distance (a model that learned nothing follows the dashed line)", fontsize=10)
+    ax.legend(frameon=False, fontsize=8, loc="upper right")
+
+    # 3. MAE per closest wall and link length
+    ax = axes[2]
+    wall = meta_test["wall"].str.split(" (", n=1, regex=False).str[0].to_numpy()
+    tiles = meta_test["n_tiles"].to_numpy()
+    groups = [(w, n) for w in dict.fromkeys(wall) for n in sorted(set(tiles[wall == w]))]
+    rows = []
+    for w, n in groups:
+        sel = (wall == w) & (tiles == n)
+        rows.append({"group": f"{w}, {n * TILE_CM:.0f} cm ({sel.sum()})", "mean of train": np.abs(base_err[sel]).mean(),
+                     **{name: np.abs(e[sel]).mean() for name, e in err.items()}})
+    tab = pd.DataFrame(rows).set_index("group")
+    y_pos = np.arange(len(tab))[::-1]
+    h = 0.8 / max(len(err), 1)
+    for i, name in enumerate(err):
+        ax.barh(y_pos + (len(err) - 1) / 2 * h - i * h, tab[name], height=h * 0.85, color=colors[name], label=name,
+                zorder=2)
+    ax.scatter(tab["mean of train"], y_pos, marker="|", s=900, color="#4a4a4a", lw=2.5, zorder=3)
+    ax.axvspan(*GOAL_CM, color="#1baf7a", alpha=0.12, lw=0, zorder=0)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(tab.index, fontsize=8)
+    ax.set_xlabel("MAE (cm)")
+    ax.set_title("MAE by closest wall and link length (bar left of the tick = beats the mean)", fontsize=10)
+    handles = ax.get_legend_handles_labels()[0] + [
+        plt.Line2D([], [], marker="|", ls="", color="#4a4a4a", markersize=12, mew=2.5, label="mean of train")]
+    ax.legend(handles=handles, frameon=False, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.13),
+              ncol=len(handles))
+
+    for ax in axes:
+        ax.grid(color="#e0e0e0", lw=0.8)
+        ax.set_axisbelow(True)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+    fig.suptitle(title, fontsize=12)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+    beats = {name: 100 * (np.abs(e) < np.abs(base_err)).mean() for name, e in err.items()}
+    print(f"\nerror distribution (test set; links within {GOAL_CM[1]} cm, links better than the mean of train):")
+    print(pd.DataFrame({name: {f"≤ {GOAL_CM[1]} cm (%)": 100 * (np.abs(e) <= GOAL_CM[1]).mean(),
+                               "median |error| (cm)": np.median(np.abs(e)),
+                               "90th pct |error| (cm)": np.percentile(np.abs(e), 90),
+                               "beats mean of train (%)": beats.get(name, np.nan)}
+                        for name, e in {"mean of train": base_err, **err}.items()}).T.round(1).to_string())
+    print("\nMAE (cm) by closest wall and link length (number of test links):")
+    print(tab.round(1).to_string())
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--length-cm", default="92",
@@ -420,6 +536,9 @@ def main():
                     help="keep each label pair once, from the first experiment that measured it")
     ap.add_argument("--loo", action="store_true",
                     help="leave one experiment out: train on the other experiments, test on it, for every experiment")
+    ap.add_argument("--loo-dedup", action=argparse.BooleanOptionalAction, default=True,
+                    help="with --loo, drop the training samples of every label pair the held-out experiment measured "
+                         "(--no-loo-dedup: keep them)")
     args = ap.parse_args()
     if args.zero_start and not args.unwrap:
         ap.error("--zero-start only works with unwrapped phase (drop --no-unwrap)")
@@ -456,18 +575,23 @@ def main():
     print(f"{len(X)} samples (one per link and experiment, median over {meta.n_runs.min()}–{meta.n_runs.max()} runs), {X.shape[1]} features: θ̂{'' if args.unwrap else ' (wrapped)'}{' (start at 0)' if args.zero_start else ''}{' + α̂' if args.attn else ''} at "
           f"{len(freqs)} freqs {freqs.min()}–{freqs.max()} MHz")
 
-    te, preds = evaluate(X, y, meta, args.train_frac, args.seed, args.loo)
+    te, preds = evaluate(X, y, meta, args.train_frac, args.seed, args.loo, loo_dedup=args.loo_dedup, keep_mean=True)
+    baseline = preds.pop("mean of train")
 
     OUT_DIR.mkdir(exist_ok=True)
-    tag = "-".join(lengths_cm) + "cm" + ("" if args.attn else "_phase_only") + ("_zero_start" if args.zero_start else "") + ("" if args.unwrap else "_no_unwrap") + ("_dedup" if args.dedup else "") + ("_loo" if args.loo else "") + (f"_max{args.max_wall_cm:g}cm" if args.max_wall_cm is not None else "")
+    tag = "-".join(lengths_cm) + "cm" + ("" if args.attn else "_phase_only") + ("_zero_start" if args.zero_start else "") + ("" if args.unwrap else "_no_unwrap") + ("_dedup" if args.dedup else "") + ("_loo" + ("-dedup" if args.loo_dedup else "") if args.loo else "") + (f"_max{args.max_wall_cm:g}cm" if args.max_wall_cm is not None else "")
     out = meta.iloc[te].reset_index(drop=True).assign(**{f"pred_{k}": v for k, v in preds.items()})
     out.to_csv(OUT_DIR / f"test_predictions_{tag}.csv", index=False)
     plot_predictions(y[te], preds, meta.iloc[te],
                      OUT_DIR / f"pred_vs_true_{tag}.png",
                      f"{', '.join(lengths_cm)} cm links, θ̂{'' if args.unwrap else ' (wrapped)'}{' (start at 0)' if args.zero_start else ''}{' + α̂' if args.attn else ' only'}: "
                      "distance from closest parallel wall (test set)")
+    plot_errors(y[te], preds, baseline, meta.iloc[te], OUT_DIR / f"errors_{tag}.png",
+                f"{', '.join(lengths_cm)} cm links, θ̂{'' if args.unwrap else ' (wrapped)'}{' + α̂' if args.attn else ' only'}"
+                f"{' (leave one experiment out' + (', held-out pairs dropped from training)' if args.loo_dedup else ')') if args.loo else ''}"
+                ": error distribution (test set)")
     print(f"\nwrote {(OUT_DIR / f'test_predictions_{tag}.csv').relative_to(ROOT)}, "
-          f"{(OUT_DIR / f'pred_vs_true_{tag}.png').relative_to(ROOT)}")
+          f"{(OUT_DIR / f'pred_vs_true_{tag}.png').relative_to(ROOT)}, {(OUT_DIR / f'errors_{tag}.png').relative_to(ROOT)}")
 
 
 if __name__ == "__main__":
