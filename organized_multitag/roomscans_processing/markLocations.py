@@ -13,7 +13,7 @@ import open3d.visualization.rendering as rendering
 #   Close the window or press "Done" to save:
 #     <name>_marked.ply   the scan with the spheres merged in
 #     <name>_markers.csv  index,x,y,z of each sphere center
-ROOMSCANS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "roomscans")
+ROOMSCANS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "roomscans")
 
 COLORS = [[0.9, 0.1, 0.1], [0.1, 0.6, 0.9], [0.1, 0.8, 0.2], [0.95, 0.7, 0.1],
           [0.7, 0.2, 0.9], [0.1, 0.9, 0.8], [0.9, 0.4, 0.6], [0.5, 0.5, 0.5]]

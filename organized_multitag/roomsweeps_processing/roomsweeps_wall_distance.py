@@ -45,13 +45,14 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVR
 
-ROOT = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parent   # organized_multitag/roomsweeps_processing: code and *_out folders
+ROOT = HERE.parent                        # organized_multitag: data, scans and cache shared by every subfolder
 DATA_DIR = ROOT / "roomsweeps_data"
 SCAN_DIR = ROOT / "roomscans"
 MESH_PATH = SCAN_DIR / "merged.ply"
 MARKERS_PATH = SCAN_DIR / "merged_markers.csv"
 CACHE_DIR = ROOT / ".cache"
-OUT_DIR = ROOT / "roomsweeps_wall_distance_out"
+OUT_DIR = HERE / "roomsweeps_wall_distance_out"
 FREQ_RANGE = (775, 955)   # MHz, inclusive; default band of this script and roomsweeps_wall_distance_fit.py
 
 TILE_CM = 46.0
@@ -118,15 +119,21 @@ def infer_positions(exp_num):
     return positions_frame(tags, labels, "inferred")
 
 
+N_LEAPFROG = N_COLS - 2   # exps 1…15 are the leapfrog sweep (rows 1-5); later exps have their own layout in positions.txt
+
+
 def all_positions():
     exp_dirs = sorted((d for d in DATA_DIR.iterdir() if d.is_dir()), key=lambda d: int(d.name))
     out = {}
     for d in exp_dirs:
+        n = int(d.name)
         pos = load_positions(d)
-        if pos is not None:
-            guess = infer_positions(int(d.name))["label"]
+        if n > N_LEAPFROG:
+            assert pos is not None, f"exp {d.name} is outside the leapfrog sweep and needs a positions.txt"
+        elif pos is not None:
+            guess = infer_positions(n)["label"]
             assert (guess.loc[pos.index] == pos["label"]).all(), f"leapfrog pattern doesn't match exp {d.name}"
-        out[d.name] = pos if pos is not None else infer_positions(int(d.name))
+        out[d.name] = pos if pos is not None else infer_positions(n)
     return out
 
 

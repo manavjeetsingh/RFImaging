@@ -45,13 +45,17 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_absolute_error
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gridsim_processing"))   # gridsim_wall_distance
+
 from gridsim_wall_distance import TransformerRegressor
 from roomsweeps_wall_distance import (DATA_DIR, FREQ_RANGE, GOAL_CM, BASELINE_COLOR, N_COLS, N_ROWS, PART_COLORS, ROOT,
                                       TILE_CM, all_positions, build_dataset, evaluate, find_walls, fit_predict,
                                       grid_xy, load_bidir, label_grid, link_part, wall_distance_cm)
 from roomsweeps_wall_distance_posttrain import ResCNNRegressor
 
-OUT_DIR = ROOT / "roomsweeps_wall_distance_alllinks_out"
+OUT_DIR = Path(__file__).resolve().parent / "roomsweeps_wall_distance_alllinks_out"
 PARALLEL_DEG = 5.0        # links within this angle of the hit wall count as parallel
 ANGLE_CLASSES = [         # (name, upper bound in degrees, scatter marker), angle between the link and the hit wall
     ("parallel (< 5°)", PARALLEL_DEG, "o"),

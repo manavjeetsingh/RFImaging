@@ -19,6 +19,7 @@ Features: Δ, A, period and α̂ per frequency (median over runs; unless --no-at
     python roomsweeps_wall_distance_fit.py --max-wall-cm 200   # only links within 200 cm of their closest parallel wall
 """
 import argparse
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -27,7 +28,7 @@ from roomsweeps_wall_distance import (DATA_DIR, FREQ_RANGE, ROOT, TILE_CM, N_COL
                                       find_walls, grid_xy, link_runs, load_bidir, median_phase, parallel_links,
                                       plot_predictions, wall_distance_cm)
 
-OUT_DIR = ROOT / "roomsweeps_wall_distance_fit_out"
+OUT_DIR = Path(__file__).resolve().parent / "roomsweeps_wall_distance_fit_out"
 
 
 def fit_sine(x, y, n_periods=400, max_cond=100):

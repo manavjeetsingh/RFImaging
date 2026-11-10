@@ -20,6 +20,7 @@ frequency tokens are (Δ, α̂) per frequency; A and period go into its read-out
     python gridsim_wall_distance_fit.py --max-wall-cm 200     # only links within 200 cm of their closest parallel wall
 """
 import argparse
+from pathlib import Path
 
 import numpy as np
 
@@ -27,7 +28,7 @@ from gridsim_wall_distance import (common_args, evaluate, freq_cols, link_featur
                                    output_tag, save_outputs, transformer_models)
 from roomsweeps_wall_distance import ROOT
 
-OUT_DIR = ROOT / "gridsim_wall_distance_fit_out"
+OUT_DIR = Path(__file__).resolve().parent / "gridsim_wall_distance_fit_out"
 
 
 def phase_fit_rows(theta, freqs, n_periods=400, max_cond=100, chunk=4096):

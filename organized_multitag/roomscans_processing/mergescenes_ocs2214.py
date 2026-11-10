@@ -23,14 +23,14 @@ import open3d as o3d
 # Scenes to merge. The first one is the reference frame.
 # ----------------------------------------------------------------------------
 SCENE_PATHS = [
-    "roomscans/mapping_2214_1_marked.ply",
-    "roomscans/mapping_2214_2_marked.ply",
-    "roomscans/mapping_2214_3_marked.ply",
-    "roomscans/mapping_2214_4_marked.ply",
-    "roomscans/mapping_2214_5_marked.ply",
-    # "roomscans/mapping_2214_3.ply",
-    # "roomscans/mapping_2214_4.ply",
-    # "roomscans/mapping_2214_5.ply",
+    "../roomscans/mapping_2214_1_marked.ply",
+    "../roomscans/mapping_2214_2_marked.ply",
+    "../roomscans/mapping_2214_3_marked.ply",
+    "../roomscans/mapping_2214_4_marked.ply",
+    "../roomscans/mapping_2214_5_marked.ply",
+    # "../roomscans/mapping_2214_3.ply",
+    # "../roomscans/mapping_2214_4.ply",
+    # "../roomscans/mapping_2214_5.ply",
 ]
 # All outputs go to OUTPUT_DIR; if it does not exist, to the folder of the first scene.
 OUTPUT_DIR = "/Users/manavjeet/git/RFImaging/organized_multitag/roomscans/merged_out"

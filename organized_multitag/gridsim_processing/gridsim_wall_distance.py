@@ -51,10 +51,12 @@ from torch import nn
 from sklearn.metrics import mean_absolute_error
 from sklearn.model_selection import GroupKFold, GroupShuffleSplit
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "roomsweeps_processing"))   # roomsweeps_wall_distance
 from roomsweeps_wall_distance import CACHE_DIR, DIRECTION_MARKERS, FREQ_RANGE, PART_COLORS, ROOT, TILE_CM, fit_predict, metrics
 
 DATA_PATH = ROOT / "grid_exp_simulated_data" / "data.csv"
-OUT_DIR = ROOT / "gridsim_wall_distance_out"
+OUT_DIR = Path(__file__).resolve().parent / "gridsim_wall_distance_out"
 FEATURE_PREFIXES = ("theta", "theta_uw", "alpha", "delta")
 WALL_COLORS = dict(zip(["x_min", "x_max", "y_min", "y_max"], PART_COLORS))
 

@@ -33,6 +33,7 @@ different scales. Also prints the explained variance and the Spearman correlatio
     python roomsweeps_wall_distance_pca.py --sine-fit --no-phase      # sine A, period (+ α̂) only
 """
 import argparse
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -47,7 +48,7 @@ from roomsweeps_wall_distance import (DATA_DIR, FREQ_RANGE, N_COLS, N_ROWS, ROOT
                                       wall_distance_cm)
 from roomsweeps_wall_distance_fit import fit_sine
 
-OUT_DIR = ROOT / "roomsweeps_wall_distance_pca_out"
+OUT_DIR = Path(__file__).resolve().parent / "roomsweeps_wall_distance_pca_out"
 LENGTH_MARKERS = {1: "s", 2: "o", 3: "^", 4: "D", 5: "v", 6: "P", 7: "X"}   # tiles -> symbol
 
 

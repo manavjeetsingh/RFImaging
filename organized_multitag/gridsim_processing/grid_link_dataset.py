@@ -2,7 +2,7 @@
 grid_link_dataset.py — per-link wall-distance dataset from a gridTagDatagen.py run.
 
 Turns the simulated unidirectional Θ̂ / V̂ / β̂ of every grid-aligned link into the
-features that RFImaging/organized_multitag/roomsweeps_wall_distance.py and
+features that RFImaging/organized_multitag/roomsweeps_processing/roomsweeps_wall_distance.py and
 roomsweeps_wall_distance_fit.py train on, one CSV row per (simulation, exciter, link):
 
     α̂12 = ½ (β̂1 / V̂2 + β̂2 / V̂1)        θ̂12 = ((Θ̂1 + Θ̂2) / 2) mod π
@@ -46,7 +46,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # RFImaging
 sys.path.insert(0, os.path.join(_REPO_ROOT, "datagen_realistic"))
 
 from gridTagDatagen import link_wall_distance

@@ -36,7 +36,7 @@ K = 8 random extra paths multiplying the response, 1 + Σ a_k exp(−j(2πfτ_k 
 α̂ × 0.47 with a random per-link gain; a smooth phase-only wiggle up to 12°; 1.5° / 2 % noise. The pretrained CNN is
 cached in roomsweeps_wall_distance_posttrain_out/ (--rescnn-retrain: train it again).
 
-    python roomsweeps_wall_distance_posttrain.py --model gridsim_wall_distance_out/transformer_92cm.pt
+    python roomsweeps_wall_distance_posttrain.py --model ../gridsim_processing/gridsim_wall_distance_out/transformer_92cm.pt
     python roomsweeps_wall_distance_posttrain.py --model … --loo              # leave one experiment out
     python roomsweeps_wall_distance_posttrain.py --model … --freeze-encoder   # train the regression heads only
     python roomsweeps_wall_distance_posttrain.py --model … --renorm           # standardize on the real training rows
@@ -56,13 +56,16 @@ import torch
 from torch import nn
 from sklearn.metrics import mean_absolute_error
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gridsim_processing"))   # gridsim_wall_distance
+
 from gridsim_wall_distance import DATA_PATH, TransformerRegressor, load_sim, select_links
 from gridsim_wall_distance import build_dataset as build_sim_dataset
 from roomsweeps_wall_distance import (DATA_DIR, N_COLS, N_ROWS, ROOT, TILE_CM, all_positions, build_dataset, evaluate,
                                       find_walls, fit_predict, grid_xy, load_bidir, parallel_links, plot_predictions,
                                       wall_distance_cm)
 
-OUT_DIR = ROOT / "roomsweeps_wall_distance_posttrain_out"
+OUT_DIR = Path(__file__).resolve().parent / "roomsweeps_wall_distance_posttrain_out"
 
 
 # ---------------------------------------------------------------- residual CNN
