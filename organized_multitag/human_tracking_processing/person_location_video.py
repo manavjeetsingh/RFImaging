@@ -16,13 +16,20 @@ For walking915_1 / walking915_2 (one frequency, 70 runs; every run measures all 
 3. Location. The plain average of the 6 link centres of the selected cluster (unweighted). It is shown as solid
    when the cluster score is above the --base-pct percentile of
    the same best-cluster score in baseline915 (i.e. bigger than anything the empty room produces), faded otherwise.
-4. Video. Camera recording (vid_start_time.txt in the experiment folder) on the left, layout on the right: links
+4. Track (--tracker, see tracking.py). The location above is decided per run on its own. The tracker links the
+   runs: grid (default) is a Bayes filter on a floor grid whose likelihood is the soft cluster score at every point
+   and whose motion model lets the person walk ~--walk-speed m/s between runs; kalman is a constant-velocity
+   Kalman filter on the per-run cluster locations; none keeps the per-run location. --smooth uses all runs
+   (forward-backward / RTS) instead of runs up to the current one.
+5. Video. Camera recording (vid_start_time.txt in the experiment folder) on the left, layout on the right: links
    coloured by their score, updated when each link's measurement completes (the stop time of the later of its two
    MPPs); the selected cluster outlined and the location (with a short trail) updated when the run completes.
 
     python person_location_video.py walking915_1
     python person_location_video.py walking915_2 --radius 0.5 --speed 2
-Also writes <exp>_person_location.csv (one row per run: time, location, cluster, scores).
+    python person_location_video.py walking915_1 --tracker kalman
+Also writes <exp>_person_location.csv (one row per run: time, location, track, cluster, scores). Outputs of
+--tracker kalman / none are named <exp>_person_location_kalman.* / _raw.*.
 """
 
 import argparse
@@ -36,17 +43,21 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.animation import FFMpegWriter
-from matplotlib.colors import Normalize
-from matplotlib.patches import FancyArrowPatch
+from matplotlib.colors import LinearSegmentedColormap, Normalize
+from matplotlib.patches import Ellipse, FancyArrowPatch
 
 from link_distance_video import (DATA_DIR, HERE, HIGHLIGHT, CameraReader, bidirectional, link_curvature, load_csv,
                                  rotate_layout, tag_color, tag_num, tag_positions, upright_angle, video_start)
+from tracking import grid_track, kalman_track, make_grid, soft_cluster_score, support
 
 BASELINE = "baseline915"
 MD_WINDOW = 11            # rolling-median window (runs), as in the notebook
 CLUSTER_SIZE = 6
 LOCATION = "#1baf7a"
 TRAIL = 4                 # previous locations drawn behind the current one
+RAW = "#7a7a7a"           # per-run location when a tracker is on
+GRID_PAD = 0.35           # m around the tags, as the plot
+SUFFIX = {"grid": "", "kalman": "_kalman", "none": "_raw"}    # output file name per tracker
 
 
 # ---------------------------------------------------------------- scores
@@ -121,11 +132,28 @@ def dominance(scores, clusters, best):
 
 # ---------------------------------------------------------------- pipeline
 
-def analyse(exp, radius, base_pct, rotate, agg="gmean"):
+def analyse(exp, radius, base_pct, rotate, agg="gmean", max_link_length=None):
     exp_df = load_csv(DATA_DIR / exp)
     exp_m, base_m = bidirectional(exp_df), bidirectional(load_csv(DATA_DIR / BASELINE))
     for name, mm in ((exp, exp_m), (BASELINE, base_m)):
         assert mm["Frequency (MHz)"].nunique() == 1, f"{name}: expected one frequency"
+
+    # layout (rotated for display; distances do not change)
+    ref, markers = tag_positions(DATA_DIR / exp)
+    rotate = upright_angle(ref) if rotate is None else rotate
+    ref, markers = rotate_layout(ref, markers, rotate)
+    xy = {int(t): ref.loc[t, ["x", "y"]].to_numpy(float) for t in ref.index}
+
+    if max_link_length is not None:
+        # drop links longer than max_link_length (m) from the experiment and the baseline before anything else
+        def short(mm):
+            length = np.array([np.linalg.norm(xy[tag_num(a)] - xy[tag_num(b)]) for a, b in zip(mm["T1"], mm["T2"])])
+            return mm[length <= max_link_length]
+        n_all = len(set(zip(exp_m["T1"], exp_m["T2"])))
+        exp_m, base_m = short(exp_m), short(base_m)
+        n_kept = len(set(zip(exp_m["T1"], exp_m["T2"])))
+        print(f"  max link length {max_link_length:g} m: {n_kept} / {n_all} links kept")
+        assert n_kept, f"no link is {max_link_length} m or shorter"
     links, theta, attn, ready = link_matrix(exp_m)
     b_links, b_theta, b_attn, _ = link_matrix(base_m)
     assert links == b_links, "experiment and baseline have different links"
@@ -136,11 +164,7 @@ def analyse(exp, radius, base_pct, rotate, agg="gmean"):
     scores = link_scores(theta, attn, scales)                      # runs × links
     b_scores = link_scores(b_theta, b_attn, scales)
 
-    # layout (rotated for display; distances do not change) and link centres
-    ref, markers = tag_positions(DATA_DIR / exp)
-    rotate = upright_angle(ref) if rotate is None else rotate
-    ref, markers = rotate_layout(ref, markers, rotate)
-    xy = {int(t): ref.loc[t, ["x", "y"]].to_numpy(float) for t in ref.index}
+    # link centres
     centres = np.array([(xy[a] + xy[b]) / 2 for a, b in links])
 
     clusters = candidate_clusters(centres, radius)
@@ -164,12 +188,43 @@ def analyse(exp, radius, base_pct, rotate, agg="gmean"):
     return res
 
 
+def track(res, tracker, smooth, beta, walk_speed, rho, reach, meas_std, accel_std):
+    # adds res["track"]: mean (runs × 2), cov (runs × 2 × 2), and for the grid tracker the posterior per run
+    valid = res["best_rms"] > res["threshold"]
+    kind = "smooth" if smooth else "filt"
+    if tracker == "none":
+        res["track"] = None
+        return res
+    if tracker == "grid":
+        xs, ys = make_grid(res["ref"], GRID_PAD)
+        mask = support(res["centres"], xs, ys, reach)
+        soft = soft_cluster_score(res["scores"], res["centres"], xs, ys, rho, CLUSTER_SIZE)
+        o = grid_track(soft, valid, res["run_time"], xs, ys, beta, walk_speed, mask, smooth)
+        t = dict(post=o[kind], xs=xs, ys=ys, label=f"grid Bayes filter (beta {beta:g}, {walk_speed:g} m/s, "
+                                                     f"rho {rho:g} m)")
+    else:
+        o = kalman_track(res["loc"], res["best_rms"], valid, res["run_time"], res["threshold"], meas_std, accel_std,
+                         walk_speed, smooth)
+        t = dict(label=f"constant-velocity Kalman filter (meas {meas_std:g} m, accel {accel_std:g} m/s²)")
+        print(f"  kalman: {o['used'].sum()} / {len(valid)} runs used (others below threshold or gated out)")
+    t.update(kind=tracker, mean=o[f"{kind}_mean"], cov=o[f"{kind}_cov"], smooth=smooth)
+    step = lambda a: np.linalg.norm(np.diff(a, axis=0), axis=1).mean()
+    print(f"  {tracker} track{' (smoothed)' if smooth else ''}: mean step between runs {step(t['mean']):.2f} m "
+          f"(per-run location {step(res['loc']):.2f} m), median 1-sigma radius "
+          f"{np.median(np.sqrt(np.trace(t['cov'], axis1=1, axis2=2))):.2f} m")
+    res["track"] = t
+    return res
+
+
 def save_table(res, path):
     links = res["links"]
     rows = []
     for k in range(len(res["run_time"])):
         c = res["clusters"][res["best"][k]]
         rows.append({"run": k, "time (s)": res["run_time"][k], "x": res["loc"][k, 0], "y": res["loc"][k, 1],
+                     **({} if res["track"] is None else
+                        {"track x": res["track"]["mean"][k, 0], "track y": res["track"]["mean"][k, 1],
+                         "track sd (m)": np.sqrt(np.trace(res["track"]["cov"][k]))}),
                      "cluster score": res["best_rms"][k], "strongest link share": res["dominance"][k], "above threshold": res["best_rms"][k] > res["threshold"],
                      "cluster": " ".join(f"T{links[i][0]}-T{links[i][1]}" for i in c),
                      **{f"T{a}-T{b}": res["scores"][k, i] for i, (a, b) in enumerate(links)}})
@@ -228,6 +283,19 @@ def make_video(res, out, fps, speed, vmax, dpi, vid_start):
         ax.scatter(r.x, r.y, s=260, color=tag_color(tag), edgecolors="white", linewidths=1.5, zorder=4)
         ax.annotate(tag, (r.x, r.y), ha="center", va="center", fontsize=9, color="white", fontweight="bold",
                     zorder=5)
+    trk = res["track"]
+    heat = ellipse = raw = None
+    if trk is not None and "post" in trk:
+        step = trk["xs"][1] - trk["xs"][0]
+        heat = ax.imshow(np.zeros_like(trk["post"][0]), origin="lower", zorder=0.5, interpolation="bilinear",
+                         extent=(trk["xs"][0] - step / 2, trk["xs"][-1] + step / 2,
+                                 trk["ys"][0] - step / 2, trk["ys"][-1] + step / 2),
+                         cmap=LinearSegmentedColormap.from_list("post", [(1, 1, 1, 0), LOCATION]), vmin=0, vmax=1)
+    if trk is not None:
+        ellipse = ax.add_patch(Ellipse((0, 0), 0, 0, fill=False, ec=LOCATION, lw=1.5, ls="--", zorder=5.4))
+        raw = ax.scatter([np.nan], [np.nan], marker="o", s=70, facecolors="none", edgecolors=RAW, linewidths=1.5,
+                         zorder=5.6, label="this run alone (cluster centre)")
+    est = res["loc"] if trk is None else trk["mean"]
     trail = ax.plot([], [], "-o", color=LOCATION, ms=5, lw=1.2, alpha=0.5, zorder=5.5)[0]
     person = ax.scatter([np.nan], [np.nan], marker="*", s=520, color=LOCATION, edgecolors="white", linewidths=1.5,
                         zorder=6)
@@ -241,8 +309,14 @@ def make_video(res, out, fps, speed, vmax, dpi, vid_start):
     title = ax.set_title("", fontsize=11)
     fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), cax=cax,
                  label=f"link score (× {BASELINE} noise)")
-    fig.suptitle(f"{exp}: person location from the {CLUSTER_SIZE}-link cluster with the largest score "
-                 f"(star = average of its link centres)", fontsize=11, y=0.975)
+    if trk is None:
+        fig.suptitle(f"{exp}: person location from the {CLUSTER_SIZE}-link cluster with the largest score "
+                     f"(star = average of its link centres)", fontsize=11, y=0.975)
+    else:
+        fig.suptitle(f"{exp}: tracked location, {trk['label']}{', smoothed over all runs' if trk['smooth'] else ''}"
+                     f"\nstar = track, dashed = 1-sigma"
+                     f"{', green = probability of each position' if heat is not None else ''}"
+                     f", grey circle = this run's best cluster alone", fontsize=10.5, y=0.985)
 
     # timeline: best-cluster score per run and the empty-room threshold
     tax.step(run_time, res["best_rms"], where="post", color="#08306b", lw=1.3, label=f"best cluster score ({res['agg']})")
@@ -279,10 +353,21 @@ def make_video(res, out, fps, speed, vmax, dpi, vid_start):
                 for i in res["clusters"][res["best"][k]]:
                     outlines[i].set_alpha(0.85 if strong else 0.35)
                     outlines[i].set_linewidth(0.8 + 5.5 * norm(scores[k, i]) + 5)
-                person.set_offsets([res["loc"][k]])
-                person.set_alpha(1.0 if strong else 0.3)
-                tr = res["loc"][max(0, k - TRAIL):k + 1]
+                person.set_offsets([est[k]])
+                person.set_alpha(1.0 if strong or trk is not None else 0.3)
+                tr = est[max(0, k - TRAIL):k + 1]
                 trail.set_data(tr[:, 0], tr[:, 1])
+                if trk is not None:
+                    raw.set_offsets([res["loc"][k]])
+                    raw.set_alpha(1.0 if strong else 0.4)
+                    vals, vecs = np.linalg.eigh(trk["cov"][k])
+                    ellipse.set_center(est[k])
+                    ellipse.set_width(2 * np.sqrt(max(vals[1], 0)))
+                    ellipse.set_height(2 * np.sqrt(max(vals[0], 0)))
+                    ellipse.set_angle(np.degrees(np.arctan2(vecs[1, 1], vecs[0, 1])))
+                if heat is not None:
+                    q = trk["post"][k]
+                    heat.set_data(q / q.max() * 0.75)
                 title.set_text(f"t = {t:6.2f} s   run {k + 1} / {len(run_time)}   cluster score "
                                f"{res['best_rms'][k]:.2f} ({'above' if strong else 'below'} threshold)")
             else:
@@ -304,6 +389,7 @@ def make_video(res, out, fps, speed, vmax, dpi, vid_start):
 
 
 def main():
+    global DATA_DIR
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("exp", nargs="?", default="walking915_1", help="walking915_1 or walking915_2")
     ap.add_argument("--radius", type=float, default=0.4,
@@ -312,6 +398,24 @@ def main():
                     help="cluster score from its 6 link scores (default gmean: all links must be raised)")
     ap.add_argument("--base-pct", type=float, default=99,
                     help="percentile of the baseline915 best-cluster score used as the threshold (default 99)")
+    ap.add_argument("--tracker", choices=["grid", "kalman", "none"], default="grid",
+                    help="link the runs into a track (default grid Bayes filter; none = every run on its own)")
+    ap.add_argument("--smooth", action="store_true",
+                    help="track from all runs (forward-backward / RTS) instead of the runs up to the current one")
+    ap.add_argument("--beta", type=float, default=4.0,
+                    help="grid: likelihood = (1 + soft cluster score) ** beta; larger trusts each run more (default 4)")
+    ap.add_argument("--walk-speed", type=float, default=0.45,
+                    help="walking speed (m/s): grid motion std between runs, kalman initial velocity std "
+                         "(default 0.45 = 1 mph)")
+    ap.add_argument("--rho", type=float, default=0.3,
+                    help="grid: width (m) of the Gaussian weight of the nearest link centres (default 0.3)")
+    ap.add_argument("--reach", type=float, default=0.3,
+                    help="grid: the person can only be within this distance (m) of some link centre (default 0.3)")
+    ap.add_argument("--meas-std", type=float, default=0.3,
+                    help="kalman: std (m) of a cluster location whose score is at the threshold (default 0.3)")
+    ap.add_argument("--accel-std", type=float, default=0.3,
+                    help="kalman: std (m/s^2) of the white-noise acceleration (default 0.3: the velocity can "
+                         "change by about the walking speed between runs)")
     ap.add_argument("--out", type=Path, help="output .mp4 (default <exp>_person_location.mp4 next to this script)")
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--speed", type=float, default=1.0, help="playback speed, 1 = real time")
@@ -320,12 +424,23 @@ def main():
     ap.add_argument("--vid-start", help="time in the .mov at which the experiment starts (default: vid_start_time.txt)")
     ap.add_argument("--rotate", type=float, default=None, help="layout rotation in degrees (default: T1 above T4)")
     ap.add_argument("--no-video", action="store_true", help="only write the CSV")
+    ap.add_argument("--max-link-length", type=float,
+                    help="ignore links longer than this (m, e.g. 1.5 = 150 cm) in every calculation (default: no limit)")
+    ap.add_argument("--data-dir", type=Path,
+                    help=f"folder holding <exp> and {BASELINE} (default {DATA_DIR})")
     args = ap.parse_args()
+    if args.data_dir is not None:
+        DATA_DIR = args.data_dir.resolve()
 
-    res = analyse(args.exp, args.radius, args.base_pct, args.rotate, args.agg)
-    save_table(res, HERE / f"{args.exp}_person_location.csv")
+    res = analyse(args.exp, args.radius, args.base_pct, args.rotate, args.agg, args.max_link_length)
+    res = track(res, args.tracker, args.smooth, args.beta, args.walk_speed, args.rho, args.reach, args.meas_std,
+                args.accel_std)
+    name = f"{args.exp}_person_location{SUFFIX[args.tracker]}"
+    if args.max_link_length is not None:
+        name += f"_maxlen{args.max_link_length:g}m"
+    save_table(res, HERE / f"{name}.csv")
     if not args.no_video:
-        out = args.out or HERE / f"{args.exp}_person_location.mp4"
+        out = args.out or HERE / f"{name}.mp4"
         make_video(res, out, args.fps, args.speed, args.vmax, args.dpi, args.vid_start)
 
 

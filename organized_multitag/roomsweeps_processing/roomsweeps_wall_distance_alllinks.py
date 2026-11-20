@@ -22,20 +22,30 @@ roomsweeps_wall_distance.py. Next to them (--no-nets: off) two neural networks a
 training samples only, with the scratch settings of roomsweeps_wall_distance_posttrain.py:
 
 - Transformer (scratch)   gridsim_wall_distance.TransformerRegressor, one token per frequency [θ̂, α̂], width 64,
-                          3 layers, --tf-epochs (200) epochs, batch 32, peak lr --tf-lr (1e-3), weight decay 1e-2
+                          3 layers, --tf-epochs (100) epochs, batch 32, peak lr --tf-lr (1e-3), weight decay 1e-2
 - ResCNN (scratch)        roomsweeps_wall_distance_posttrain.ResCNNRegressor, tokens [θ̂ minus its line fit, centred
                           log α̂] plus the line slope and mean log α̂, width 64, --rescnn-epochs (60) epochs, batch 32,
                           peak lr --rescnn-lr (1e-3), weight decay 1e-2
 
-The link direction, length and angle are never features; they are only used to select links (--min/--max-length-cm,
---max-angle-deg) and to break down the errors.
+By default the link direction, length and angle are never features; they are only used to select links
+(--min/--max-length-cm, --length-cm, --max-angle-deg) and to break down the errors. With --rel-pos the relative tag
+location is added: the link's tag with the lower floor label is put at (0, 0) and the other tag's position relative to
+it, (rel_x_cm, rel_y_cm) in the merged room scan's xy, becomes two extra features for every model (SVR / MLP: appended
+columns; transformer: per-link features added to the read-out token; ResCNN: appended to its per-link globals).
 
     python roomsweeps_wall_distance_alllinks.py                          # every link
+    python roomsweeps_wall_distance_alllinks.py --length-cm 92           # 92 cm links only (nominal grid length)
+    python roomsweeps_wall_distance_alllinks.py --length-cm 46,65,92     # 1-tile, 1-tile diagonal and 2-tile links
     python roomsweeps_wall_distance_alllinks.py --max-length-cm 110      # links up to 110 cm (nominal grid length)
     python roomsweeps_wall_distance_alllinks.py --min-length-cm 90 --max-length-cm 110
     python roomsweeps_wall_distance_alllinks.py --max-angle-deg 5        # only links (nearly) parallel to the hit wall
     python roomsweeps_wall_distance_alllinks.py --max-wall-cm 200        # only links whose ray hits a wall within 200 cm
     python roomsweeps_wall_distance_alllinks.py --no-attn --loo          # phase only, leave one experiment out
+    python roomsweeps_wall_distance_alllinks.py --zero-start             # unwrapped phase shifted to 0 at the lowest frequency
+    python roomsweeps_wall_distance_alllinks.py --no-unwrap              # raw θ̂ in [0, π)
+    python roomsweeps_wall_distance_alllinks.py --dedup                  # each label pair once, from its first experiment
+    python roomsweeps_wall_distance_alllinks.py --loo --no-loo-dedup     # … keeping the held-out label pairs' other copies in training
+    python roomsweeps_wall_distance_alllinks.py --rel-pos                # + the other tag's location relative to the first
 """
 import argparse
 import math
@@ -53,7 +63,8 @@ from gridsim_wall_distance import TransformerRegressor
 from roomsweeps_wall_distance import (DATA_DIR, FREQ_RANGE, GOAL_CM, BASELINE_COLOR, N_COLS, N_ROWS, PART_COLORS, ROOT,
                                       TILE_CM, all_positions, build_dataset, evaluate, find_walls, fit_predict,
                                       grid_xy, load_bidir, label_grid, link_part, wall_distance_cm)
-from roomsweeps_wall_distance_posttrain import ResCNNRegressor
+from roomsweeps_wall_distance_posttrain import ResCNN, ResCNNRegressor
+import torch
 
 OUT_DIR = Path(__file__).resolve().parent / "roomsweeps_wall_distance_alllinks_out"
 PARALLEL_DEG = 5.0        # links within this angle of the hit wall count as parallel
@@ -97,9 +108,10 @@ def perpendicular_hit(a, b, walls):
 
 
 def all_links(positions, exps, walls, min_len_cm=None, max_len_cm=None, max_angle_deg=None, dedup=False,
-              max_wall_cm=None):
+              max_wall_cm=None, lengths_cm=None):
     """Every tag pair of every experiment with the wall its perpendicular ray hits first (perpendicular_hit). Links are
-    filtered on their nominal length (TILE_CM × grid distance), their angle to the hit wall and the distance to it.
+    filtered on their nominal length (TILE_CM × grid distance: within min/max_len_cm and, if lengths_cm is given, within
+    1 cm of one of those lengths), their angle to the hit wall and the distance to it.
     A label pair measured in several experiments gives one row per experiment; with dedup only the first in `exps`."""
     rows, seen = [], set()
     for exp in exps:
@@ -113,7 +125,10 @@ def all_links(positions, exps, walls, min_len_cm=None, max_len_cm=None, max_angl
                 if (min_len_cm is not None and length_cm < min_len_cm - 0.5) or \
                         (max_len_cm is not None and length_cm > max_len_cm + 0.5):
                     continue
+                if lengths_cm is not None and not any(abs(length_cm - l) < 1 for l in lengths_cm):
+                    continue
                 a, b = grid_xy(ca, ra), grid_xy(cb, rb)
+                rel = 100 * (b - a) if la < lb else 100 * (a - b)    # tag with the lower label at (0, 0)
                 hit = perpendicular_hit(a, b, walls)
                 if max_angle_deg is not None and hit["angle_deg"] > max_angle_deg:
                     continue
@@ -126,17 +141,48 @@ def all_links(positions, exps, walls, min_len_cm=None, max_len_cm=None, max_angl
                 rows.append({"exp": exp, "T1": ta, "T2": tb, "label_a": la, "label_b": lb,
                              "part": link_part(ca, ra, cb, rb), "d_col": abs(ca - cb), "d_row": abs(ra - rb),
                              "length_cm": length_cm, "scan_length_cm": 100 * np.linalg.norm(a - b),
-                             "mid_x": (a[0] + b[0]) / 2, "mid_y": (a[1] + b[1]) / 2, **hit,
+                             "mid_x": (a[0] + b[0]) / 2, "mid_y": (a[1] + b[1]) / 2,
+                             "rel_x_cm": rel[0], "rel_y_cm": rel[1], **hit,
                              "angle_class": angle_class(hit["angle_deg"])})
     return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------- models
 
+REL_POS_COLS = ["rel_x_cm", "rel_y_cm"]
+
+
+class ResCNNExtraRegressor(ResCNNRegressor):
+    """ResCNNRegressor whose per-link globals also include the n_extra columns of X that follow θ̂ (and α̂), e.g. the
+    relative tag location. The extra columns ride along appended to the θ̂ tensor so the parent's training loop is
+    reused unchanged; _raw splits them off again and appends them to the globals (standardized with them)."""
+
+    def __init__(self, freqs, attn, n_extra, **kw):
+        super().__init__(freqs, attn, **kw)
+        self.n_extra = n_extra
+
+    def tensors(self, X, y=None):
+        th, al, y = super().tensors(X, y)
+        start = (2 if self.attn else 1) * len(self.freqs)
+        extra = torch.as_tensor(np.asarray(X[:, start:start + self.n_extra]), dtype=torch.float32, device=self.device)
+        return torch.cat([th, extra], 1), al, y
+
+    def _raw(self, th, al):
+        F = len(self.freqs)
+        tok, glob = super()._raw(th[:, :F], al)
+        return tok, torch.cat([glob, th[:, F:]], 1)
+
+    def _new_model(self):
+        n = 2 if self.attn else 1
+        return ResCNN(n, n + self.n_extra, **self.arch).to(self.device)
+
+
 def make_fit_fn(args, freqs):
     """fit_fn for roomsweeps_wall_distance.evaluate: its SVR / MLP / mean of train plus (if args.nets) a transformer
-    and a residual CNN trained from scratch on the training samples."""
+    and a residual CNN trained from scratch on the training samples. Columns of X after θ̂ (and α̂) (--rel-pos) are
+    per-link features: the transformer uses every non-token column that way, the ResCNN gets them as extra globals."""
     F = len(freqs)
+    n_extra = len(REL_POS_COLS) if args.rel_pos else 0
     token_cols = np.arange(F)[None] + F * np.arange(2 if args.attn else 1)[:, None]     # (channels, freqs)
 
     def fit_fn(X, y, tr, te, seed):
@@ -147,7 +193,8 @@ def make_fit_fn(args, freqs):
             "Transformer (scratch)": TransformerRegressor(
                 token_cols, epochs=args.tf_epochs, batch_size=args.batch_size, lr=args.tf_lr,
                 weight_decay=args.weight_decay, seed=seed, log_every=0, dim=64, layers=3).fit(X[tr], y[tr]),
-            "ResCNN (scratch)": ResCNNRegressor(freqs, args.attn).fit(
+            "ResCNN (scratch)": (ResCNNExtraRegressor(freqs, args.attn, n_extra) if n_extra
+                                 else ResCNNRegressor(freqs, args.attn)).fit(
                 X[tr], y[tr], epochs=args.rescnn_epochs, batch_size=args.batch_size, lr=args.rescnn_lr,
                 weight_decay=args.weight_decay, seed=seed),
         }
@@ -352,6 +399,9 @@ def plot_errors(y_test, preds, baseline, meta_test, path, title, bin_cm=25):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--length-cm", default=None,
+                    help="only links of these nominal length(s) in cm (TILE_CM × grid distance, ±1 cm), comma-separated, "
+                         "e.g. 92 or 46,65,92 (65 = 1-tile diagonal); default: every length")
     ap.add_argument("--min-length-cm", type=float, default=None, help="shortest nominal link length (TILE_CM × grid distance)")
     ap.add_argument("--max-length-cm", type=float, default=None, help="longest nominal link length")
     ap.add_argument("--max-angle-deg", type=float, default=None,
@@ -375,9 +425,12 @@ def main():
     ap.add_argument("--loo-dedup", action=argparse.BooleanOptionalAction, default=True,
                     help="with --loo, drop the training samples of every label pair the held-out experiment measured "
                          "(--no-loo-dedup: keep them)")
+    ap.add_argument("--rel-pos", action="store_true",
+                    help="add the relative tag location as features: the link's lower-label tag at (0, 0), the other "
+                         "tag's (x, y) relative to it in cm")
     ap.add_argument("--nets", action=argparse.BooleanOptionalAction, default=True,
                     help="also train a transformer and a residual CNN from scratch (--no-nets: SVR / MLP only)")
-    ap.add_argument("--tf-epochs", type=int, default=200)
+    ap.add_argument("--tf-epochs", type=int, default=100)
     ap.add_argument("--tf-lr", type=float, default=1e-3, help="peak transformer learning rate")
     ap.add_argument("--rescnn-epochs", type=int, default=60)
     ap.add_argument("--rescnn-lr", type=float, default=1e-3, help="peak ResCNN learning rate")
@@ -386,6 +439,8 @@ def main():
     args = ap.parse_args()
     if args.zero_start and not args.unwrap:
         ap.error("--zero-start only works with unwrapped phase (drop --no-unwrap)")
+
+    lengths = None if args.length_cm is None else [float(x) for x in args.length_cm.split(",")]
 
     positions = all_positions()
     exps = [e for e in positions if any((DATA_DIR / e).glob("*.csv"))]
@@ -399,9 +454,9 @@ def main():
         print(f"  {name:<30} {wall_distance_cm(edge, w):6.1f} cm")
 
     links = all_links(positions, exps, walls, args.min_length_cm, args.max_length_cm, args.max_angle_deg, args.dedup,
-                      args.max_wall_cm)
+                      args.max_wall_cm, lengths)
     if links.empty:
-        raise SystemExit("no links match --min/--max-length-cm, --max-angle-deg, --max-wall-cm")
+        raise SystemExit("no links match --length-cm, --min/--max-length-cm, --max-angle-deg, --max-wall-cm")
     print(f"\n{len(links)} links ({links.groupby(['label_a', 'label_b']).ngroups} label pairs), nominal length "
           f"{links.length_cm.min():.0f}–{links.length_cm.max():.0f} cm "
           f"({links.scan_length_cm.min():.0f}–{links.scan_length_cm.max():.0f} cm in the scan)")
@@ -415,17 +470,22 @@ def main():
     OUT_DIR.mkdir(exist_ok=True)
     tag = ("all" if args.min_length_cm is None and args.max_length_cm is None
            else f"{args.min_length_cm or 0:g}-{args.max_length_cm or 'inf'}cm") \
+        + ("_len" + "-".join(f"{l:g}" for l in lengths) + "cm" if lengths is not None else "") \
         + (f"_max{args.max_angle_deg:g}deg" if args.max_angle_deg is not None else "") \
         + ("" if args.attn else "_phase_only") + ("_zero_start" if args.zero_start else "") \
         + ("" if args.unwrap else "_no_unwrap") + ("_dedup" if args.dedup else "") \
         + ("_loo" + ("-dedup" if args.loo_dedup else "") if args.loo else "") \
-        + (f"_max{args.max_wall_cm:g}cm" if args.max_wall_cm is not None else "")
+        + (f"_max{args.max_wall_cm:g}cm" if args.max_wall_cm is not None else "") \
+        + ("_relpos" if args.rel_pos else "")
     plot_geometry(links, walls, OUT_DIR / f"geometry_{tag}.png")
 
     print("\nloading θ̂, α̂ …")
     bidir = {e: load_bidir(e) for e in exps}
     X, y, meta, freqs = build_dataset(links, bidir, (args.freq_min, args.freq_max), args.attn, args.zero_start, args.unwrap)
-    feat = f"θ̂{'' if args.unwrap else ' (wrapped)'}{' (start at 0)' if args.zero_start else ''}{' + α̂' if args.attn else ''}"
+    if args.rel_pos:
+        X = np.hstack([X, meta[REL_POS_COLS].to_numpy(float)])
+    feat = f"θ̂{'' if args.unwrap else ' (wrapped)'}{' (start at 0)' if args.zero_start else ''}{' + α̂' if args.attn else ''}" \
+        + (" + rel. tag pos" if args.rel_pos else "")
     print(f"{len(X)} samples (one per link and experiment, median over {meta.n_runs.min()}–{meta.n_runs.max()} runs), "
           f"{X.shape[1]} features: {feat} at {len(freqs)} freqs {freqs.min()}–{freqs.max()} MHz")
 

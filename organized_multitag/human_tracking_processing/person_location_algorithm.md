@@ -72,7 +72,7 @@ Script: `person_location_video.py`. Experiments: `walking915_1`, `walking915_2`.
 
 - Best-cluster score > 8.76 → **someone is there** (solid star).
 - Otherwise → **not sure** (faded star).
-- Each run is decided on its own. There is no memory and no smoothing between runs.
+- Each run is decided on its own. There is no memory and no smoothing between runs (the tracker in Step 6b adds that).
 
 ### Numbers (best-cluster score)
 
@@ -94,6 +94,54 @@ Script: `person_location_video.py`. Experiments: `walking915_1`, `walking915_2`.
 - **Not real time:** it needs 5 runs (~10 s) after the current one.
 - **Not a jump test:** the notebook's motion detection opens an event when the score **rises by more than a delta from the previous run**. This script does not do that.
 
+## Step 6b: Tracking (linking the runs)
+
+Steps 4–5 decide every run on its own: run k+1 does not use run k. The tracker (`--tracker`, code in
+`tracking.py`) carries a belief about the position from run to run.
+
+### grid (default): Bayes filter on a floor grid
+
+- **State:** the position, on a 5 cm grid over the layout. Only points within `--reach` (0.3 m) of some link
+  centre are allowed: elsewhere no link says anything.
+- **Belief:** a probability for every grid point. Start: uniform.
+- **Predict** (between runs, dt ≈ 2 s): blur the belief with a Gaussian of std `--walk-speed` × dt
+  (0.45 m/s = 1 mph, the walking speed in these experiments → ~0.9 m). The person can have walked anywhere within about that distance.
+- **Update** (each run): multiply by the likelihood, then normalise.
+  - Soft cluster score at point p: G(p) = geometric mean of (1 + link score) over the **6 links whose centres are
+    nearest to p**, weighted by exp(−d² / 2ρ²) (`--rho` 0.3 m), minus 1.
+  - The same idea as the cluster score (6 links, geometric mean), but for every point of the floor, with no hard
+    choice of one cluster.
+  - Likelihood = (1 + G(p))^β (`--beta` 4). Larger β trusts each run more, smaller β trusts the motion model more.
+  - Runs below the threshold: no update, prediction only.
+- **Output:** posterior mean (the star) and its covariance (dashed 1-σ ellipse); the posterior itself is the
+  green shading in the video.
+- `--smooth`: forward–backward smoothing, so each run uses the runs after it too (the rolling median in Step 2
+  already does).
+
+Why not (only) a Kalman filter:
+
+- The per-run measurement is an argmax over clusters. When two areas score about the same, it flips between them.
+  A Kalman filter assumes one Gaussian blob and averages the two. The grid keeps both until the next runs decide.
+- The grid uses all 28 link scores every run, not only the 6 chosen ones.
+- Per-run locations can only be cluster centroids, and these bunch in the middle of the cross ("pulled to the
+  middle"). The grid can put the person anywhere near a link centre.
+
+### kalman: constant-velocity Kalman filter
+
+- State x, y, vx, vy. Initial velocity std `--walk-speed`. White-noise acceleration `--accel-std` (0.3 m/s²: the
+  velocity can change by about the walking speed between runs, as the person turns often in this small area).
+- Measurement = the per-run location of Step 5, std `--meas-std` (0.3 m) × √(threshold / cluster score), so
+  strong runs count more.
+- A measurement more than 3.5 σ (Mahalanobis) from the prediction is ignored; runs below the threshold are
+  prediction only. `--smooth` = RTS smoother.
+- Inherits the per-run location's bias to the middle. It only smooths it.
+
+### Limit for both: one update every ~2 s
+
+- At 1 mph the person moves ~0.9 m between runs, half the size of the cross. So the motion model can only
+  say "close to where they were". It cannot predict the next position.
+- Faster runs (fewer links per run, or one update per link at its own `ready` time) would help most.
+
 ## Step 7: Video
 
 - **Left:** camera frame.
@@ -102,16 +150,19 @@ Script: `person_location_video.py`. Experiments: `walking915_1`, `walking915_2`.
 - **Right:** tag layout, rotated so T1 is straight above T4.
   - Link colour and width = link score. A link changes when its value is ready.
   - The chosen cluster is outlined in orange.
-  - Star = location, with a trail of the last 4 locations.
+  - Star = location, with a trail of the last 4 locations. With a tracker: the star is the track, the grey circle
+    is the per-run location, the dashed ellipse is the 1-σ uncertainty, the green shading is the grid posterior.
   - Both change when the run's last link is ready.
 - **Bottom:** best-cluster score over time, the threshold line, and a cursor.
 - Plays in real time (`--speed` changes it).
 
 ## Outputs
 
-- `<exp>_person_location.mp4`: the video.
+- `<exp>_person_location.mp4`: the video (grid tracker); `_kalman.mp4` / `_raw.mp4` with `--tracker kalman` /
+  `none`, and the CSV likewise.
 - `<exp>_person_location.csv`: one row per run with:
-  - time, x, y (rotated layout, metres)
+  - time, x, y (rotated layout, metres): the per-run location
+  - track x, track y, track sd (m), when a tracker is on
   - cluster score, above threshold or not
   - share of the strongest link (1/6 = even)
   - the 6 chosen links
@@ -127,6 +178,14 @@ Script: `person_location_video.py`. Experiments: `walking915_1`, `walking915_2`.
 | `--speed` | 1 | Video speed (1 = real time) |
 | `--vid-start` | from file | Overrides `vid_start_time.txt` |
 | `--rotate` | auto | Layout rotation; auto puts T1 above T4 |
+| `--tracker` | grid | grid, kalman, or none (per-run location only) |
+| `--smooth` | off | Use all runs (forward–backward / RTS) |
+| `--beta` | 4 | grid: likelihood exponent |
+| `--walk-speed` | 0.45 | walking speed (m/s, 1 mph): grid motion std, kalman initial velocity std |
+| `--rho` | 0.3 | grid: weight width of the 6 nearest link centres (m) |
+| `--reach` | 0.3 | grid: max distance from a link centre (m) |
+| `--meas-std` | 0.3 | kalman: location std at the threshold score (m) |
+| `--accel-std` | 0.3 | kalman: acceleration std (m/s²) |
 | `--no-video` | off | Write only the CSV |
 
 ## Known limits
@@ -134,4 +193,4 @@ Script: `person_location_video.py`. Experiments: `walking915_1`, `walking915_2`.
 - **Pulled to the middle:** long links (e.g. T1–T3, T5–T7) all have their centres near the middle of the cross.
 - **Threshold is too low:** almost every walking run passes (see Step 6).
 - **Offline only:** the rolling median uses runs after the current one.
-- **Slow:** one location every ~2 s.
+- **Slow:** one location every ~2 s (see Step 6b).
