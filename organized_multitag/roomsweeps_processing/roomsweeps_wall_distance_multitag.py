@@ -105,17 +105,22 @@ def link_features(th, al, freqs, attn=True):
     return np.stack(tok, -1), np.stack(glob, -1)
 
 
-def build_clusters(positions, exps, walls, link_index, n_tags, max_span_cm, max_per_exp, seed):
+def build_clusters(positions, exps, walls, link_index, n_tags, max_span_cm, max_per_exp, seed, max_tag_wall_cm=None):
     """Every compact n-tag cluster with all its links measured: (meta frame, link indices (N, K), label-pair ids (N, K),
     relative tag locations (N, 2(n − 1))). The K = C(n, 2) links of a cluster are in the order of
     itertools.combinations over its sorted tags. Relative locations: the lowest-label tag at (0, 0), the others' (x, y)
-    in cm relative to it, in increasing label order, flattened as x1, y1, x2, y2, …."""
+    in cm relative to it, in increasing label order, flattened as x1, y1, x2, y2, ….
+    With max_tag_wall_cm, only tags whose own distance to their closest wall is at most that are used."""
     rng = np.random.default_rng(seed)
     meta, idx, pairs, rels, pair_id = [], [], [], [], {}
     for exp in exps:
         pos = positions[exp]
         rows = []
-        for tags in itertools.combinations(sorted(pos.index), n_tags):
+        usable = sorted(pos.index)
+        if max_tag_wall_cm is not None:
+            usable = [t for t in usable if min(wall_distance_cm(grid_xy(*label_grid(pos.loc[t, "label"])), w)
+                                               for w in walls.values()) <= max_tag_wall_cm + 1e-6]
+        for tags in itertools.combinations(usable, n_tags):
             labels = [int(pos.loc[t, "label"]) for t in tags]
             grid = np.array([label_grid(l) for l in labels], float)
             span = max(TILE_CM * np.linalg.norm(grid[i] - grid[j]) for i, j in itertools.combinations(range(n_tags), 2))
@@ -248,6 +253,10 @@ class HierarchicalTransformer(nn.Module):
 
 
 NETS = {"mlp": DeepSetMLP, "rescnn": FusionResCNN, "transformer": HierarchicalTransformer}
+
+# PyTorch's fused inference fast path for TransformerEncoderLayer (eval + no_grad) returns NaN on CUDA when given the
+# learned float attention bias above (seen with torch 2.11+cu130; fine on CPU / MPS and in training). Use the regular path.
+torch.backends.mha.set_fastpath_enabled(False)
 
 
 def fit_net(key, tok, glob, idx, ctx, y, tr, te, relation, args, device):
@@ -413,6 +422,8 @@ def main():
     ap.add_argument("--n-tags", type=int, default=4, help="tags per cluster; all C(n, 2) links between them are used")
     ap.add_argument("--max-span-cm", type=float, default=150.0,
                     help="largest nominal distance between two tags of a cluster (negative: no limit)")
+    ap.add_argument("--max-tag-wall-cm", type=float, default=None,
+                    help="only use tags whose own distance to their closest wall is at most this (cm)")
     ap.add_argument("--max-clusters-per-exp", type=int, default=None, help="randomly keep at most this many per experiment")
     ap.add_argument("--models", default="svr,mlp,rescnn,transformer", help="comma-separated: svr, mlp, rescnn, transformer")
     ap.add_argument("--freq-min", type=float, default=FREQ_RANGE[0], help="MHz, inclusive")
@@ -453,9 +464,10 @@ def main():
     link_index, th, al, freqs = load_links(positions, exps, bidir, (args.freq_min, args.freq_max))
     tok, glob = link_features(th, al, freqs, args.attn)
 
-    meta, idx, pairs, rel = build_clusters(positions, exps, walls, link_index, args.n_tags, span, args.max_clusters_per_exp, args.seed)
+    meta, idx, pairs, rel = build_clusters(positions, exps, walls, link_index, args.n_tags, span, args.max_clusters_per_exp, args.seed,
+                                           args.max_tag_wall_cm)
     if meta.empty:
-        raise SystemExit("no clusters match --n-tags / --max-span-cm")
+        raise SystemExit("no clusters match --n-tags / --max-span-cm / --max-tag-wall-cm")
     y = meta["wall_cm"].to_numpy()
     ctx = rel if args.rel_pos else np.zeros((len(meta), 0))
     print(f"{len(meta)} clusters of {args.n_tags} tags ({idx.shape[1]} links each), span {meta.span_cm.min():.0f}–"
@@ -479,14 +491,16 @@ def main():
 
     OUT_DIR.mkdir(exist_ok=True)
     tag = f"n{args.n_tags}_span{'all' if span is None else f'{span:g}cm'}" + ("" if args.attn else "_phase_only") \
-        + ("" if args.purge else "_no_purge") + ("_relpos" if args.rel_pos else "")
+        + ("" if args.purge else "_no_purge") + ("_relpos" if args.rel_pos else "") \
+        + ("" if args.max_tag_wall_cm is None else f"_tagwall{args.max_tag_wall_cm:g}cm")
     n_train, n_test = table["train clusters"], table["test clusters"]
     per_fold = lambda s: f"{s.min()}" if s.min() == s.max() else f"{s.min()}–{s.max()} (mean {s.mean():.0f})"
     sizes = f"train {per_fold(n_train)} clusters per fold, test {per_fold(n_test)} clusters per fold, " \
             f"{len(table)} folds, {n_test.sum()} held-out predictions"
     print(f"\ndata sizes: {sizes}")
     title = f"{args.n_tags} tags, {idx.shape[1]} links per cluster, span ≤ " \
-            f"{'any' if span is None else f'{span:g} cm'}{', + relative tag locations' if args.rel_pos else ''}, " \
+            f"{'any' if span is None else f'{span:g} cm'}{', + relative tag locations' if args.rel_pos else ''}" \
+            f"{'' if args.max_tag_wall_cm is None else f', tags ≤ {args.max_tag_wall_cm:g} cm from a wall'}, " \
             f"leave one experiment out\n{sizes}"
     meta[done].reset_index(drop=True).assign(**{f"pred_{k}": v for k, v in preds.items()}).to_csv(
         OUT_DIR / f"predictions_{tag}.csv", index=False)
