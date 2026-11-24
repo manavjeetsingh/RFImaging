@@ -66,6 +66,8 @@ from sklearn.svm import SVR
 from roomsweeps_wall_distance import (BASELINE_COLOR, DATA_DIR, FREQ_RANGE, GOAL_CM, PART_COLORS, ROOT, TILE_CM,
                                       all_positions, find_walls, grid_xy, label_grid, link_runs, load_bidir,
                                       median_phase, metrics, wall_distance_cm)
+from roomsweeps_wall_distance import (add_data_version_arg, has_experiment,  # noqa: E402
+                                      set_data_version, version_tag)
 
 OUT_DIR = Path(__file__).resolve().parent / "roomsweeps_wall_distance_multitag_out"
 MODEL_NAMES = {"svr": "SVR", "mlp": "MLP (DeepSets)", "rescnn": "ResCNN (frequency fusion)",
@@ -446,7 +448,9 @@ def main():
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--weight-decay", type=float, default=1e-2)
     ap.add_argument("--device", default=None, help="torch device (default: cuda, else mps, else cpu)")
+    add_data_version_arg(ap)
     args = ap.parse_args()
+    set_data_version(args.data_version)
     if args.n_tags < 2:
         ap.error("--n-tags must be at least 2")
     args.model_keys = [m.strip() for m in args.models.split(",") if m.strip()]
@@ -457,7 +461,7 @@ def main():
                                           "mps" if torch.backends.mps.is_available() else "cpu"))
 
     positions = all_positions()
-    exps = [e for e in positions if any((DATA_DIR / e).glob("*.csv"))]
+    exps = [e for e in positions if has_experiment(e)]
     walls = find_walls()
     print(f"experiments: {', '.join(exps)}\nloading θ̂, α̂ …", flush=True)
     bidir = {e: load_bidir(e) for e in exps}
@@ -493,6 +497,7 @@ def main():
     tag = f"n{args.n_tags}_span{'all' if span is None else f'{span:g}cm'}" + ("" if args.attn else "_phase_only") \
         + ("" if args.purge else "_no_purge") + ("_relpos" if args.rel_pos else "") \
         + ("" if args.max_tag_wall_cm is None else f"_tagwall{args.max_tag_wall_cm:g}cm")
+    tag += version_tag()
     n_train, n_test = table["train clusters"], table["test clusters"]
     per_fold = lambda s: f"{s.min()}" if s.min() == s.max() else f"{s.min()}–{s.max()} (mean {s.mean():.0f})"
     sizes = f"train {per_fold(n_train)} clusters per fold, test {per_fold(n_test)} clusters per fold, " \

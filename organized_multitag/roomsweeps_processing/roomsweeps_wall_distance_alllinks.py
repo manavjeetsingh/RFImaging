@@ -65,6 +65,8 @@ from roomsweeps_wall_distance import (DATA_DIR, FREQ_RANGE, GOAL_CM, BASELINE_CO
                                       grid_xy, load_bidir, label_grid, link_part, wall_distance_cm)
 from roomsweeps_wall_distance_posttrain import ResCNN, ResCNNRegressor
 import torch
+from roomsweeps_wall_distance import (add_data_version_arg, has_experiment,  # noqa: E402
+                                      set_data_version, version_tag)
 
 OUT_DIR = Path(__file__).resolve().parent / "roomsweeps_wall_distance_alllinks_out"
 PARALLEL_DEG = 5.0        # links within this angle of the hit wall count as parallel
@@ -436,14 +438,16 @@ def main():
     ap.add_argument("--rescnn-lr", type=float, default=1e-3, help="peak ResCNN learning rate")
     ap.add_argument("--batch-size", type=int, default=32, help="transformer and ResCNN batch size")
     ap.add_argument("--weight-decay", type=float, default=1e-2, help="transformer and ResCNN weight decay")
+    add_data_version_arg(ap)
     args = ap.parse_args()
+    set_data_version(args.data_version)
     if args.zero_start and not args.unwrap:
         ap.error("--zero-start only works with unwrapped phase (drop --no-unwrap)")
 
     lengths = None if args.length_cm is None else [float(x) for x in args.length_cm.split(",")]
 
     positions = all_positions()
-    exps = [e for e in positions if any((DATA_DIR / e).glob("*.csv"))]
+    exps = [e for e in positions if has_experiment(e)]
     print(f"experiments with a CSV: {', '.join(exps)}  "
           f"(positions inferred for: {', '.join(e for e in exps if positions[e]['source'].iloc[0] == 'inferred') or 'none'})")
 
@@ -477,6 +481,7 @@ def main():
         + ("_loo" + ("-dedup" if args.loo_dedup else "") if args.loo else "") \
         + (f"_max{args.max_wall_cm:g}cm" if args.max_wall_cm is not None else "") \
         + ("_relpos" if args.rel_pos else "")
+    tag += version_tag()
     plot_geometry(links, walls, OUT_DIR / f"geometry_{tag}.png")
 
     print("\nloading θ̂, α̂ …")

@@ -28,6 +28,10 @@ out in turn, and the other experiments' copies of its label pairs are dropped fr
     python roomsweeps_wall_distance.py --loo           # leave one experiment out instead of the random split
     python roomsweeps_wall_distance.py --loo --no-loo-dedup  # … keeping the held-out label pairs' other copies in training
     python roomsweeps_wall_distance.py --max-wall-cm 200   # only links within 200 cm of their closest parallel wall
+    python roomsweeps_wall_distance.py --data-version improvedv1  # read <name>_improvedv1.csv (robust MPP + p70)
+
+--data-version (in every roomsweeps_wall_distance*.py) picks the experiment CSV: the collected one (default) or the
+one rewritten by phase_calc_improvements/reprocess_improvedv1.py; improvedv1 outputs get an _improvedv1 suffix.
 """
 import argparse
 import re
@@ -143,8 +147,58 @@ def tag_num(name):
     return int(str(name).replace("Tag", ""))
 
 
+# ---------------------------------------------------------------- data version (--data-version)
+#
+# Each experiment folder holds the collected <name>.csv and, after
+# phase_calc_improvements/reprocess_improvedv1.py, <name>_improvedv1.csv (robust MPP extraction + 70th-percentile
+# channel aggregation). --data-version picks which one is read; the default stays the original CSV.
+
+DATA_VERSIONS = {"original": "", "improvedv1": "_improvedv1"}   # version -> CSV stem suffix
+DATA_VERSION = "original"
+
+
+def add_data_version_arg(ap):
+    ap.add_argument("--data-version", choices=list(DATA_VERSIONS), default="original",
+                    help="experiment CSV to read: the original collection, or <name>_improvedv1.csv from "
+                         "phase_calc_improvements/reprocess_improvedv1.py (outputs then get an _improvedv1 suffix)")
+
+
+def set_data_version(version):
+    global DATA_VERSION
+    if version not in DATA_VERSIONS:
+        raise ValueError(f"unknown data version {version!r}, expected one of {list(DATA_VERSIONS)}")
+    DATA_VERSION = version
+
+
+def version_tag():
+    """Suffix for output file names: '' for the original data, '_improvedv1' otherwise."""
+    return DATA_VERSIONS[DATA_VERSION]
+
+
+def experiment_csv(exp_dir, version=None):
+    """The experiment CSV of `exp_dir` for `version` (default: the active --data-version)."""
+    suffix = DATA_VERSIONS[version or DATA_VERSION]
+    others = [s for s in DATA_VERSIONS.values() if s and s != suffix]
+    csvs = [c for c in Path(exp_dir).glob("*.csv")
+            if c.stem.endswith(suffix) and not any(c.stem.endswith(o) for o in others)]
+    if suffix == "":
+        csvs = [c for c in csvs if not any(c.stem.endswith(s) for s in DATA_VERSIONS.values() if s)]
+    if len(csvs) != 1:
+        raise FileNotFoundError(f"{exp_dir}: expected one {version or DATA_VERSION} experiment CSV, "
+                                f"found {[c.name for c in csvs]}")
+    return csvs[0]
+
+
+def has_experiment(exp, data_dir=None):
+    try:
+        experiment_csv((data_dir or DATA_DIR) / exp)
+        return True
+    except FileNotFoundError:
+        return False
+
+
 def load_csv(exp_dir):
-    f = next(Path(exp_dir).glob("*.csv"))
+    f = experiment_csv(exp_dir)
     cols = pd.read_csv(f, nrows=0).columns
     return pd.read_csv(f, usecols=[c for c in cols if "voltages" not in c.lower()])
 
@@ -172,7 +226,7 @@ def bidirectional(df):
 def load_bidir(exp):
     """Bidirectional table for one experiment, cached (the CSVs are ~500 MB each)."""
     exp_dir = DATA_DIR / exp
-    csv = next(exp_dir.glob("*.csv"))
+    csv = experiment_csv(exp_dir)
     cache = CACHE_DIR / f"bidir_{exp}_{csv.stem}.pkl"
     if cache.exists():
         try:
@@ -546,7 +600,9 @@ def main():
     ap.add_argument("--loo-dedup", action=argparse.BooleanOptionalAction, default=True,
                     help="with --loo, drop the training samples of every label pair the held-out experiment measured "
                          "(--no-loo-dedup: keep them)")
+    add_data_version_arg(ap)
     args = ap.parse_args()
+    set_data_version(args.data_version)
     if args.zero_start and not args.unwrap:
         ap.error("--zero-start only works with unwrapped phase (drop --no-unwrap)")
 
@@ -558,7 +614,7 @@ def main():
     lengths_cm = [f"{n * TILE_CM:.0f}" for n in n_tiles]
 
     positions = all_positions()
-    exps = [e for e in positions if any((DATA_DIR / e).glob("*.csv"))]
+    exps = [e for e in positions if has_experiment(e)]
     print(f"experiments with a CSV: {', '.join(exps)}  "
           f"(positions inferred for: {', '.join(e for e in exps if positions[e]['source'].iloc[0] == 'inferred') or 'none'})")
 
@@ -587,6 +643,7 @@ def main():
 
     OUT_DIR.mkdir(exist_ok=True)
     tag = "-".join(lengths_cm) + "cm" + ("" if args.attn else "_phase_only") + ("_zero_start" if args.zero_start else "") + ("" if args.unwrap else "_no_unwrap") + ("_dedup" if args.dedup else "") + ("_loo" + ("-dedup" if args.loo_dedup else "") if args.loo else "") + (f"_max{args.max_wall_cm:g}cm" if args.max_wall_cm is not None else "")
+    tag += version_tag()
     out = meta.iloc[te].reset_index(drop=True).assign(**{f"pred_{k}": v for k, v in preds.items()})
     out.to_csv(OUT_DIR / f"test_predictions_{tag}.csv", index=False)
     plot_predictions(y[te], preds, meta.iloc[te],

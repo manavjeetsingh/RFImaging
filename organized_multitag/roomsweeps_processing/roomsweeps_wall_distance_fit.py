@@ -27,6 +27,8 @@ import pandas as pd
 from roomsweeps_wall_distance import (DATA_DIR, FREQ_RANGE, ROOT, TILE_CM, N_COLS, N_ROWS, all_positions, evaluate,
                                       find_walls, grid_xy, link_runs, load_bidir, median_phase, parallel_links,
                                       plot_predictions, wall_distance_cm)
+from roomsweeps_wall_distance import (add_data_version_arg, has_experiment,  # noqa: E402
+                                      set_data_version, version_tag)
 
 OUT_DIR = Path(__file__).resolve().parent / "roomsweeps_wall_distance_fit_out"
 
@@ -87,7 +89,9 @@ def main():
                     help="keep each label pair once, from the first experiment that measured it")
     ap.add_argument("--loo", action="store_true",
                     help="leave one experiment out: train on the other experiments, test on it, for every experiment")
+    add_data_version_arg(ap)
     args = ap.parse_args()
+    set_data_version(args.data_version)
 
     lengths = [float(x) for x in args.length_cm.split(",")]
     n_tiles = sorted({int(round(l / TILE_CM)) for l in lengths})
@@ -97,7 +101,7 @@ def main():
     lengths_cm = [f"{n * TILE_CM:.0f}" for n in n_tiles]
 
     positions = all_positions()
-    exps = [e for e in positions if any((DATA_DIR / e).glob("*.csv"))]
+    exps = [e for e in positions if has_experiment(e)]
     print(f"experiments with a CSV: {', '.join(exps)}  "
           f"(positions inferred for: {', '.join(e for e in exps if positions[e]['source'].iloc[0] == 'inferred') or 'none'})")
 
@@ -126,6 +130,7 @@ def main():
 
     OUT_DIR.mkdir(exist_ok=True)
     tag = "-".join(lengths_cm) + "cm" + ("" if args.attn else "_fit_only") + ("_dedup" if args.dedup else "") + ("_loo" if args.loo else "") + (f"_max{args.max_wall_cm:g}cm" if args.max_wall_cm is not None else "")
+    tag += version_tag()
     out = meta.iloc[te].reset_index(drop=True).assign(**{f"pred_{k}": v for k, v in preds.items()})
     out.to_csv(OUT_DIR / f"test_predictions_{tag}.csv", index=False)
     plot_predictions(y[te], preds, meta.iloc[te],

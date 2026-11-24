@@ -55,6 +55,8 @@ from roomsweeps_wall_distance import (DATA_DIR, FREQ_RANGE, N_COLS, N_ROWS, ROOT
                                       find_walls, grid_xy, load_bidir, wall_distance_cm)
 from roomsweeps_wall_distance_alllinks import ANGLE_CLASSES, all_links
 from roomsweeps_wall_distance_pca import distance_bins, phase_features
+from roomsweeps_wall_distance import (add_data_version_arg, has_experiment,  # noqa: E402
+                                      set_data_version, version_tag)
 
 OUT_DIR = Path(__file__).resolve().parent / "roomsweeps_wall_distance_alllinks_pca_out"
 LENGTH_MARKERS = ["s", "o", "^", "D", "v", "P", "X", "<", ">", "p", "h", "*", "d", "8", "H"]   # shortest link first
@@ -143,7 +145,9 @@ def main():
                     help="add the amplitude A and period of the sine fitted to Δ as features")
     ap.add_argument("--no-phase", action="store_true",
                     help="with --sine-fit: drop the per-frequency phase block (θ̂ / Δ / double delta)")
+    add_data_version_arg(ap)
     args = ap.parse_args()
+    set_data_version(args.data_version)
     if args.zero_start and not args.unwrap:
         ap.error("--zero-start only works with unwrapped phase (drop --no-unwrap)")
     if (args.delta_phase or args.delta_sine_phase or args.sine_fit) and not args.unwrap:
@@ -156,7 +160,7 @@ def main():
     lengths = None if args.length_cm is None else [float(x) for x in args.length_cm.split(",")]
 
     positions = all_positions()
-    exps = [e for e in positions if any((DATA_DIR / e).glob("*.csv"))]
+    exps = [e for e in positions if has_experiment(e)]
     print(f"experiments with a CSV: {', '.join(exps)}")
 
     walls = find_walls()
@@ -223,6 +227,7 @@ def main():
            + ("_sine" if args.sine_fit else "") + ("_no_phase" if args.no_phase else "")
            + (f"_max{args.max_wall_cm:g}cm" if args.max_wall_cm is not None else "")
            + ("" if args.scale else "_noscale"))
+    tag += version_tag()
     meta.assign(**{f"PC{k + 1}": Z[:, k] for k in range(pca.n_components_)}).to_csv(OUT_DIR / f"pca_{tag}.csv",
                                                                                    index=False)
     png = OUT_DIR / f"pca_{tag}{'' if args.marker == 'length' else '_by_angle'}.png"
