@@ -18,6 +18,8 @@ Attenuation (alpha) is not stored in these CSVs; downstream code computes it fro
 
     python reprocess_improvedv1.py ../roomsweeps_data
     python reprocess_improvedv1.py ../roomsweeps_data --jobs 4 --overwrite
+    python reprocess_improvedv1.py ../roomsweeps_data --vna-data /path/to/all_s11_poly.csv \
+        --pv-data /path/to/all_pv_polynomials.csv --mac-tag-file /path/to/mac-tag-mapping.json
 """
 import argparse
 import ast
@@ -113,13 +115,14 @@ def process_row(row, channels, cfg, tag_mac):
     return out
 
 
-def process_csv(csv, overwrite=False):
+def process_csv(csv, overwrite=False, vna_data=pco.VNA_DATA_PATH, pv_data=pco.PV_DATA_PATH,
+                mac_tag_file=pco.MAC_TAG_FILE):
     csv = Path(csv)
     dst = csv.with_name(f"{csv.stem}{SUFFIX}.csv")
     if dst.exists() and not overwrite:
         return f"{csv.parent.name}: {dst.name} exists, skipped (--overwrite to redo)"
     t0 = time.time()
-    cfg, tag_mac = pco.load_hw_config(), pco.load_tag_mac_mapping()
+    cfg, tag_mac = pco.load_hw_config(vna_data, pv_data), pco.load_tag_mac_mapping(mac_tag_file)
     cols = list(pd.read_csv(csv, nrows=0).columns)
     channels = channels_from_header(cols)
     out_cols = output_columns(cols, channels)
@@ -154,13 +157,23 @@ def main():
     ap.add_argument("data_dir", type=Path, help="folder whose sub-directories each hold one experiment CSV")
     ap.add_argument("--jobs", type=int, default=min(8, os.cpu_count() or 1), help="experiments processed in parallel")
     ap.add_argument("--overwrite", action="store_true", help=f"redo experiments that already have a {SUFFIX} CSV")
+    ap.add_argument("--vna-data", type=Path, default=Path(pco.VNA_DATA_PATH),
+                    help="VNA S11 calibration CSV (all_s11_poly.csv)")
+    ap.add_argument("--pv-data", type=Path, default=Path(pco.PV_DATA_PATH),
+                    help="PV calibration CSV (all_pv_polynomials.csv)")
+    ap.add_argument("--mac-tag-file", type=Path, default=Path(pco.MAC_TAG_FILE),
+                    help="tag MAC <-> name mapping (mac-tag-mapping.json)")
     args = ap.parse_args()
+    for f in (args.vna_data, args.pv_data, args.mac_tag_file):
+        if not f.is_file():
+            ap.error(f"calibration file not found: {f}")
 
     csvs = experiment_csvs(args.data_dir)
     print(f"{len(csvs)} experiments in {args.data_dir}, {args.jobs} jobs")
     t0 = time.time()
     with ProcessPoolExecutor(max_workers=args.jobs) as ex:
-        futs = {ex.submit(process_csv, c, args.overwrite): c for c in csvs}
+        futs = {ex.submit(process_csv, c, args.overwrite, args.vna_data, args.pv_data, args.mac_tag_file): c
+                for c in csvs}
         for f in as_completed(futs):
             try:
                 print("  " + f.result(), flush=True)
