@@ -64,6 +64,8 @@ from gridsim_wall_distance import build_dataset as build_sim_dataset
 from roomsweeps_wall_distance import (DATA_DIR, N_COLS, N_ROWS, ROOT, TILE_CM, all_positions, build_dataset, evaluate,
                                       find_walls, fit_predict, grid_xy, load_bidir, parallel_links, plot_predictions,
                                       wall_distance_cm)
+from roomsweeps_wall_distance import (add_data_version_arg, has_experiment,  # noqa: E402
+                                      set_data_version, version_tag)
 
 OUT_DIR = Path(__file__).resolve().parent / "roomsweeps_wall_distance_posttrain_out"
 
@@ -380,7 +382,9 @@ def main():
     ap.add_argument("--rescnn-joint", action=argparse.BooleanOptionalAction, default=True,
                     help="post-train the ResCNN on real batches mixed with augmented sim batches "
                          "(--no-rescnn-joint: real batches only)")
+    add_data_version_arg(ap)
     args = ap.parse_args()
+    set_data_version(args.data_version)
 
     pretrained, info = TransformerRegressor.load(args.model)
     pretrained.log_every = 0
@@ -399,7 +403,7 @@ def main():
     lengths_cm = [f"{n * TILE_CM:.0f}" for n in n_tiles]
 
     positions = all_positions()
-    exps = [e for e in positions if any((DATA_DIR / e).glob("*.csv"))]
+    exps = [e for e in positions if has_experiment(e)]
     print(f"experiments with a CSV: {', '.join(exps)}")
     walls = find_walls()
     print("walls (distance of the nearest grid edge from the wall):")
@@ -440,6 +444,7 @@ def main():
            + ("_renorm" if args.renorm else "")
            + (f"_rescnn{args.rescnn_ft_epochs}ep_lr{args.rescnn_ft_lr:g}" + ("" if args.rescnn_joint else "_realonly")
               + ("" if args.rescnn_aug else "_noaug") if args.rescnn else ""))
+    tag += version_tag()
     out = meta.iloc[te].reset_index(drop=True).assign(**{f"pred_{k}": v for k, v in preds.items()})
     out.to_csv(OUT_DIR / f"test_predictions_{tag}.csv", index=False)
     plot_predictions(y[te], preds, meta.iloc[te], OUT_DIR / f"pred_vs_true_{tag}.png",

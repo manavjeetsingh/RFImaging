@@ -26,6 +26,8 @@ import matplotlib.pyplot as plt
 from roomsweeps_wall_distance import (DATA_DIR, FREQ_RANGE, GOAL_CM, BASELINE_COLOR, PART_COLORS, ROOT, all_positions,
                                       build_dataset, evaluate, find_walls, load_bidir)
 from roomsweeps_wall_distance_alllinks import all_links, make_fit_fn
+from roomsweeps_wall_distance import (add_data_version_arg, has_experiment,  # noqa: E402
+                                      set_data_version, version_tag)
 
 OUT_DIR = Path(__file__).resolve().parent / "roomsweeps_wall_distance_alllinks_buckets_out"
 MIN_SAMPLES = 10          # buckets with fewer samples are skipped
@@ -119,12 +121,14 @@ def main():
     ap.add_argument("--rescnn-lr", type=float, default=1e-3, help="peak ResCNN learning rate")
     ap.add_argument("--batch-size", type=int, default=32, help="transformer and ResCNN batch size")
     ap.add_argument("--weight-decay", type=float, default=1e-2, help="transformer and ResCNN weight decay")
+    add_data_version_arg(ap)
     args = ap.parse_args()
+    set_data_version(args.data_version)
     buckets = parse_buckets(args.buckets)
     max_walls = [float(v) for v in args.max_wall_cm.split(",")]
 
     positions = all_positions()
-    exps = [e for e in positions if any((DATA_DIR / e).glob("*.csv"))]
+    exps = [e for e in positions if has_experiment(e)]
     print(f"experiments with a CSV: {', '.join(exps)}")
     walls = find_walls()
     print("loading θ̂, α̂ …")
@@ -135,6 +139,7 @@ def main():
         + ("_dedup" if args.dedup else "") + ("_loo-dedup" if args.loo_dedup else "_loo") \
         + ("" if args.nets else "_no_nets") + ("_signed" if args.signed else "")
     tag = tag.lstrip("_") or "unwrap"
+    tag += version_tag()
     OUT_DIR.mkdir(exist_ok=True)
 
     rows = []

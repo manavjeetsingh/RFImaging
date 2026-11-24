@@ -24,6 +24,10 @@ Plots (in exciter_variance_out/):
 
     python exciter_variance.py
     python exciter_variance.py --runs 0-24    # only some runs
+    python exciter_variance.py --data-version improvedv1   # read <name>_improvedv1.csv (robust MPP + p70)
+
+--data-version picks each exciter's CSV: the collected one (default) or the one rewritten by
+phase_calc_improvements/reprocess_improvedv1.py; improvedv1 outputs get an _improvedv1 suffix.
 """
 import argparse
 from pathlib import Path
@@ -68,8 +72,22 @@ def load_positions(exc_dir):
     return {int(str(t).strip()): int(str(l).strip()) for t, l in zip(df.iloc[:, 0], df.iloc[:, 1])}
 
 
-def load_csv(exc_dir):
-    f = next(exc_dir.glob("*.csv"))
+DATA_VERSIONS = {"original": "", "improvedv1": "_improvedv1"}   # --data-version -> CSV stem suffix
+
+
+def experiment_csv(exc_dir, version="original"):
+    """The exciter's CSV for `version`: the collected one, or <name>_improvedv1.csv from reprocess_improvedv1.py."""
+    suffix = DATA_VERSIONS[version]
+    tagged = [s for s in DATA_VERSIONS.values() if s]
+    csvs = [c for c in Path(exc_dir).glob("*.csv")
+            if (c.stem.endswith(suffix) if suffix else not any(c.stem.endswith(s) for s in tagged))]
+    if len(csvs) != 1:
+        raise FileNotFoundError(f"{exc_dir}: expected one {version} CSV, found {[c.name for c in csvs]}")
+    return csvs[0]
+
+
+def load_csv(exc_dir, version="original"):
+    f = experiment_csv(exc_dir, version)
     cols = pd.read_csv(f, nrows=0).columns
     keep = ["Rx", "Tx", "Frequency (MHz)", "Run Exp Num",
             "Unidirectional Phase (deg)", "Unidirectional V", "Unidirectional beta"]
@@ -95,9 +113,9 @@ def bidirectional(df):
     return m[["T1", "T2", "freq", "run", "THETA", "alpha"]]
 
 
-def load_bidir(exc_dir):
-    """Bidirectional table of one exciter, cached (the CSVs are ~375 MB)."""
-    csv = next(exc_dir.glob("*.csv"))
+def load_bidir(exc_dir, version="original"):
+    """Bidirectional table of one exciter, cached per CSV (the CSVs are ~375 MB)."""
+    csv = experiment_csv(exc_dir, version)
     cache = CACHE_DIR / f"exciter_bidir_{exc_dir.name}_{csv.stem}.pkl"
     if cache.exists():
         try:
@@ -105,7 +123,7 @@ def load_bidir(exc_dir):
         except ModuleNotFoundError:   # written under another numpy major version
             pass
     print(f"  reading {csv.relative_to(ROOT)} …")
-    m = bidirectional(load_csv(exc_dir)[1])
+    m = bidirectional(load_csv(exc_dir, version)[1])
     CACHE_DIR.mkdir(exist_ok=True)
     m.to_pickle(cache)
     return m
@@ -243,6 +261,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--runs", help="runs to use, e.g. 0-24 or 0,2,4 (default: all)")
     ap.add_argument("--out", type=Path, default=OUT_DIR)
+    ap.add_argument("--data-version", choices=list(DATA_VERSIONS), default="original",
+                    help="exciter CSV to read: the original collection, or <name>_improvedv1.csv from "
+                         "phase_calc_improvements/reprocess_improvedv1.py (outputs then get an _improvedv1 suffix)")
     args = ap.parse_args()
     runs = parse_runs(args.runs)
     args.out.mkdir(parents=True, exist_ok=True)
@@ -250,16 +271,17 @@ def main():
     parts = []
     for key in EXCITERS:
         exc_dir = DATA_DIR / key
-        bidir = load_bidir(exc_dir)
+        bidir = load_bidir(exc_dir, args.data_version)
         if runs is not None:
             bidir = bidir[bidir["run"].isin(runs)]
         parts.append(link_variance(bidir, load_positions(exc_dir), key))
     res = pd.concat(parts, ignore_index=True)
 
     for freq, r in res.groupby("freq"):
-        tag = f"_{freq}MHz" if res["freq"].nunique() > 1 else ""
+        tag = (f"_{freq}MHz" if res["freq"].nunique() > 1 else "") + DATA_VERSIONS[args.data_version]
         n_runs = int(r["n_runs"].median())
-        title = f"Per-link standard deviation over runs per exciter, {freq} MHz, {n_runs} runs"
+        title = f"Per-link standard deviation over runs per exciter, {freq} MHz, {n_runs} runs" \
+                + ("" if args.data_version == "original" else f" [{args.data_version}]")
         r.to_csv(args.out / f"std_per_link{tag}.csv", index=False)
         for col, xlabel in METRICS:
             name = col.split("_")[0]

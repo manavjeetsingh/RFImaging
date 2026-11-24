@@ -47,6 +47,8 @@ from roomsweeps_wall_distance import (DATA_DIR, FREQ_RANGE, N_COLS, N_ROWS, ROOT
                                       build_dataset, find_walls, grid_xy, load_bidir, parallel_links,
                                       wall_distance_cm)
 from roomsweeps_wall_distance_fit import fit_sine
+from roomsweeps_wall_distance import (add_data_version_arg, has_experiment,  # noqa: E402
+                                      set_data_version, version_tag)
 
 OUT_DIR = Path(__file__).resolve().parent / "roomsweeps_wall_distance_pca_out"
 LENGTH_MARKERS = {1: "s", 2: "o", 3: "^", 4: "D", 5: "v", 6: "P", 7: "X"}   # tiles -> symbol
@@ -153,7 +155,9 @@ def main():
                     help="add the amplitude A and period of the sine fitted to Δ as features")
     ap.add_argument("--no-phase", action="store_true",
                     help="with --sine-fit: drop the per-frequency phase block (θ̂ / Δ / double delta)")
+    add_data_version_arg(ap)
     args = ap.parse_args()
+    set_data_version(args.data_version)
     if args.zero_start and not args.unwrap:
         ap.error("--zero-start only works with unwrapped phase (drop --no-unwrap)")
     if (args.delta_phase or args.delta_sine_phase or args.sine_fit) and not args.unwrap:
@@ -172,7 +176,7 @@ def main():
     lengths_cm = [f"{n * TILE_CM:.0f}" for n in n_tiles]
 
     positions = all_positions()
-    exps = [e for e in positions if any((DATA_DIR / e).glob("*.csv"))]
+    exps = [e for e in positions if has_experiment(e)]
     print(f"experiments with a CSV: {', '.join(exps)}")
 
     walls = find_walls()
@@ -232,6 +236,7 @@ def main():
            + ("_sine" if args.sine_fit else "") + ("_no_phase" if args.no_phase else "")
            + (f"_max{args.max_wall_cm:g}cm" if args.max_wall_cm is not None else "")
            + ("" if args.scale else "_noscale"))
+    tag += version_tag()
     meta.assign(**{f"PC{k + 1}": Z[:, k] for k in range(pca.n_components_)}).to_csv(OUT_DIR / f"pca_{tag}.csv",
                                                                                    index=False)
     plot_pca(Z, pca, y, meta, args.bin_cm, OUT_DIR / f"pca_{tag}.png",

@@ -59,6 +59,8 @@ from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import SplineTransformer, StandardScaler
 from sklearn.svm import SVR
+from roomsweeps_wall_distance import (add_data_version_arg, experiment_csv, has_experiment,  # noqa: E402
+                                      set_data_version, version_tag)
 
 HERE = Path(__file__).resolve().parent   # organized_multitag/roomsweeps_processing: code and *_out folders
 ROOT = HERE.parent                        # organized_multitag: data, scans and cache shared by every subfolder
@@ -159,7 +161,7 @@ def tag_num(name):
 
 
 def load_csv(exp_dir):
-    f = next(Path(exp_dir).glob("*.csv"))
+    f = experiment_csv(exp_dir)
     cols = pd.read_csv(f, nrows=0).columns
     return pd.read_csv(f, usecols=[c for c in cols if "voltages" not in c.lower()])
 
@@ -187,7 +189,7 @@ def bidirectional(df):
 def load_bidir(exp):
     """Bidirectional table for one experiment, cached (the CSVs are ~500 MB each)."""
     exp_dir = DATA_DIR / exp
-    csv = next(exp_dir.glob("*.csv"))
+    csv = experiment_csv(exp_dir)
     cache = CACHE_DIR / f"bidir_{exp}_{csv.stem}.pkl"
     if cache.exists():
         try:
@@ -700,7 +702,9 @@ def main():
     ap.add_argument("--calib-folds", type=int, default=5,
                     help="GroupKFold folds (by label pair) for the out-of-fold training predictions that the "
                          "corrections are fitted on")
+    add_data_version_arg(ap)
     args = ap.parse_args()
+    set_data_version(args.data_version)
     if args.zero_start and not args.unwrap:
         ap.error("--zero-start only works with unwrapped phase (drop --no-unwrap)")
     corrections = [] if args.correction.strip() == "none" else [c.strip() for c in args.correction.split(",")]
@@ -715,7 +719,7 @@ def main():
     lengths_cm = [f"{n * TILE_CM:.0f}" for n in n_tiles]
 
     positions = all_positions()
-    exps = [e for e in positions if any((DATA_DIR / e).glob("*.csv"))]
+    exps = [e for e in positions if has_experiment(e)]
     print(f"experiments with a CSV: {', '.join(exps)}  "
           f"(positions inferred for: {', '.join(e for e in exps if positions[e]['source'].iloc[0] == 'inferred') or 'none'})")
 
@@ -756,6 +760,7 @@ def main():
 
     OUT_DIR.mkdir(exist_ok=True)
     tag = "-".join(lengths_cm) + "cm" + ("" if args.attn else "_phase_only") + ("_zero_start" if args.zero_start else "") + ("" if args.unwrap else "_no_unwrap") + ("_dedup" if args.dedup else "") + ("_loo" + ("-dedup" if args.loo_dedup else "") if args.loo else "") + (f"_max{args.max_wall_cm:g}cm" if args.max_wall_cm is not None else "") + ("_corr-" + "-".join(corrections) if corrections else "")
+    tag += version_tag()
     out = meta.iloc[te].reset_index(drop=True).assign(**{f"pred_{k}": v for k, v in preds.items()})
     out.to_csv(OUT_DIR / f"test_predictions_{tag}.csv", index=False)
     plot_predictions(y[te], preds, meta.iloc[te],
